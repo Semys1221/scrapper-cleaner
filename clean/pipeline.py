@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -22,6 +23,8 @@ from quick_verifier import quick_verify_dataframe
 
 from instantly_client import get_api_key, push_leads_to_campaign, purge_leads_from_list
 from instantly_mark_cleaned import mark_cleaned_leads_in_instantly
+
+logger = logging.getLogger(__name__)
 
 RUN_MODE_DRY = "dry_run"
 RUN_MODE_TEST_50 = "test_50"
@@ -165,6 +168,10 @@ def run_cleaning_pipeline(
         quick_rejected_count = len(quick_result.rejected_df)
     limited_df = _apply_row_limit(quick_clean_df, run_mode, custom_limit)
     is_dry = run_mode == RUN_MODE_DRY
+    if not is_dry:
+        from shared.central_leads import probe_leads_table
+
+        probe_leads_table()
 
     raw_path = _save_csv(source_df, prefix, "raw")
     quick_path = _save_csv(quick_clean_df, prefix, "quick_clean")
@@ -250,6 +257,22 @@ def run_cleaning_pipeline(
 
     final_clean_df = stamp_cleaned_valid(final_clean_df)
     final_path = _save_csv(final_clean_df, prefix, "final_clean")
+    if not is_dry and not final_clean_df.empty:
+        from shared.central_leads import mark_emails_cleaned
+
+        cleaned_emails = (
+            final_clean_df[email_col].astype(str).str.strip().str.lower().tolist()
+        )
+        try:
+            mark_stats_db = mark_emails_cleaned(cleaned_emails)
+        except Exception as exc:
+            logger.error("Central leads cleaned-status update failed: %s", exc)
+            raise
+        if on_progress and mark_stats_db.get("updated"):
+            on_progress(
+                f"Marked {mark_stats_db['updated']} lead(s) cleaned in Supabase.",
+                0.82,
+            )
 
     push_stats = {
         "attempted": 0,

@@ -111,7 +111,7 @@ AGENCES_IMMOBILIERES_CONFIG = {
     "OUTSCRAPER_TOTAL_LIMIT_BUFFER": 8,
     "OUTSCRAPER_ENRICHMENT": ["leads_n_contacts"],
     "OUTSCRAPER_EMAIL_RECOVERY_ENABLED": True,
-    "TARGET_LEADS": 4000,
+    "TARGET_LEADS": 3000,
     "TARGET_MODE": "instantly_pushed",
     "SERVICE_DEFAULT": "Agence immobilière",
     "SERVICE_RULES": [],

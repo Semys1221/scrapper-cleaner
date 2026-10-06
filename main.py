@@ -7,6 +7,7 @@ import sys
 
 _REPO_ROOT = os.path.dirname(os.path.abspath(__file__))
 _SCRAPER_DIR = os.path.join(_REPO_ROOT, "scraper")
+_ORIGINAL_CWD = os.getcwd()
 for _path in (_SCRAPER_DIR, _REPO_ROOT):
     if _path not in sys.path:
         sys.path.insert(0, _path)
@@ -30,14 +31,29 @@ from audit_filter import run_audit
 from core_logic import (
     backfill_taxonomy_push,
     clear_local_leads,
+    format_scrape_spend,
+    next_worker_wait,
     output_paths,
     run_email_recovery,
     run_filter_audit,
     run_scraper_pipeline,
+    scrape_spend_plan,
+    scrape_spend_snapshot,
 )
 from scrape_state import detect_recoverable_run, load_scrape_state, target_mode, target_progress_value
 
 app = typer.Typer(help="Streamlit Scraper CLI")
+
+
+def _resolve_cli_path(path: str) -> str:
+    """Resolve a user path against the cwd from before chdir(scraper/) and the repo root."""
+    if not path or os.path.isabs(path):
+        return path
+    for base in (_ORIGINAL_CWD, _REPO_ROOT):
+        candidate = os.path.normpath(os.path.join(base, path))
+        if os.path.isfile(candidate):
+            return candidate
+    return os.path.normpath(os.path.join(_REPO_ROOT, path))
 
 from bootstrap.cli import app as bootstrap_app  # noqa: E402
 
@@ -312,6 +328,16 @@ def scrape(
         help="Upload leads to Instantly list after each batch (native duplicate skip)",
     ),
     preset: str = PresetOption,
+    max_cost_usd: float = typer.Option(
+        10.0,
+        "--max-cost-usd",
+        help="Hard cap on cumulative Outscraper spend for this preset, including --resume (default 10).",
+    ),
+    max_places: int = typer.Option(
+        0,
+        "--max-places",
+        help="Optional cap on places requested for this preset across --resume. 0 uses the dollar cap only.",
+    ),
 ) -> None:
     """Run the scraper headlessly in the terminal."""
     preset = _validate_preset(preset)
@@ -321,6 +347,11 @@ def scrape(
         raise typer.BadParameter("Use either --reset or --resume, not both.")
 
     config = load_config(preset)
+    from shared.central_leads import uncleaned_instantly_push_allowed
+
+    if push_instantly and not uncleaned_instantly_push_allowed():
+        _log("Instantly push withheld — uncleaned leads stay in Supabase (status=uncleaned).")
+        push_instantly = False
     if push_instantly:
         from bootstrap.validators import require_instantly_list_for_scrape_push
 
@@ -329,14 +360,33 @@ def scrape(
         except ValueError as exc:
             raise typer.BadParameter(str(exc)) from exc
 
-    if resume and target == 100:
+    saved_state = None
+    if resume:
         from scrape_state import load_scrape_state
 
-        saved = load_scrape_state(paths.scrape_state)
-        if saved and saved.get("target"):
-            target = int(saved["target"])
+        saved_state = load_scrape_state(paths.scrape_state)
+        if target == 100 and saved_state and saved_state.get("target"):
+            target = int(saved_state["target"])
             _log(f"Resume — using saved target {target}")
     config["TARGET_LEADS"] = target
+    config["MAX_SCRAPE_COST_USD"] = max_cost_usd
+    if max_places > 0:
+        config["MAX_SCRAPE_PLACES"] = max_places
+    spent = scrape_spend_snapshot(saved_state if resume else None)
+    spend = scrape_spend_plan(
+        config,
+        target=target,
+        already_saved=0,
+        already_spent_usd=float(spent["already_spent_usd"]),
+        already_places=int(spent["already_places"]),
+        spent_today_usd=float(spent["spent_today_usd"]),
+    )
+    if spend["refused"]:
+        raise typer.BadParameter(
+            "Refusing scrape: worst case for one place exceeds --max-cost-usd "
+            f"{max_cost_usd}."
+        )
+    typer.secho(format_scrape_spend(spend), fg=typer.colors.YELLOW)
 
     if resume:
         recovery = detect_recoverable_run(
@@ -394,7 +444,22 @@ def worker_loop_cmd(
         "--push-instantly/--no-push-instantly",
         help="Push enriched leads to Instantly",
     ),
-    sleep_s: int = typer.Option(30, help="Seconds between scrape iterations"),
+    sleep_s: int = typer.Option(30, help="Seconds between scrape iterations when the iteration made progress"),
+    max_cost_usd: float = typer.Option(
+        10.0,
+        "--max-cost-usd",
+        help="Cumulative Outscraper cap for this preset across every iteration (default 10).",
+    ),
+    max_daily_cost_usd: float = typer.Option(
+        10.0,
+        "--max-daily-cost-usd",
+        help="UTC-day Outscraper cap. Resets at midnight UTC (default 10).",
+    ),
+    max_places: int = typer.Option(
+        0,
+        "--max-places",
+        help="Optional cumulative places cap. 0 uses the dollar caps only.",
+    ),
 ) -> None:
     """Run scrape/resume in a loop until target progress reaches goal."""
     import time
@@ -405,6 +470,11 @@ def worker_loop_cmd(
     preset = _validate_preset(preset)
     paths = output_paths(preset)
     config = load_config(preset)
+    from shared.central_leads import uncleaned_instantly_push_allowed
+
+    if push_instantly and not uncleaned_instantly_push_allowed():
+        _log("Instantly push withheld — uncleaned leads stay in Supabase (status=uncleaned).")
+        push_instantly = False
     if push_instantly:
         from bootstrap.validators import require_instantly_list_for_scrape_push
 
@@ -420,9 +490,17 @@ def worker_loop_cmd(
         if saved and saved.get("target"):
             config["TARGET_LEADS"] = int(saved["target"])
 
+    config["MAX_SCRAPE_COST_USD"] = max_cost_usd
+    config["MAX_SCRAPE_DAILY_COST_USD"] = max_daily_cost_usd
+    if max_places > 0:
+        config["MAX_SCRAPE_PLACES"] = max_places
     goal = int(config["TARGET_LEADS"])
     mode = target_mode(config)
-    _log(f"Worker loop start — preset={preset}, target={goal}, mode={mode}")
+    zero_progress_streak = 0
+    _log(
+        f"Worker loop start — preset={preset}, target={goal}, mode={mode}, "
+        f"max_cost_usd={max_cost_usd}, max_daily_cost_usd={max_daily_cost_usd}"
+    )
 
     def _loop_progress() -> int:
         state = (
@@ -492,10 +570,20 @@ def worker_loop_cmd(
                 )
             )
         except SystemExit as exc:
+            text = str(exc)
+            if "Refusing scrape" in text:
+                touch_worker_heartbeat(paths.out_dir, preset=preset, status="blocked")
+                _log(f"Worker stopped — {text}")
+                break
             touch_worker_heartbeat(paths.out_dir, preset=preset, status="blocked")
-            _log(f"Worker blocked — {exc}")
+            _log(f"Worker blocked — {text}")
             time.sleep(min(max(sleep_s, 10), 60))
             continue
+
+        if summary.get("budget_exhausted"):
+            touch_worker_heartbeat(paths.out_dir, preset=preset, status="blocked")
+            _log("Spend budget exhausted — stopping the worker.")
+            break
 
         progress_after = _loop_progress()
         state_after = (
@@ -523,11 +611,17 @@ def worker_loop_cmd(
             if sleep_s > 0:
                 time.sleep(idle_sleep)
             continue
-        if progress_after <= progress and pushed_delta <= 0:
-            _log("No progress this iteration — retrying immediately (geo continuation).")
-            continue
-        if sleep_s > 0:
-            time.sleep(sleep_s)
+        progressed = not (progress_after <= progress and pushed_delta <= 0)
+        zero_progress_streak, wait_s = next_worker_wait(
+            progressed=progressed,
+            budget_exhausted=False,
+            streak=zero_progress_streak,
+            sleep_s=sleep_s,
+        )
+        if not progressed:
+            _log(f"No progress this iteration — backing off {int(wait_s or 0)}s.")
+        if wait_s:
+            time.sleep(wait_s)
 
 
 @app.command("heal")
@@ -829,6 +923,16 @@ def recover_emails_cmd(
         help="Push accepted recovered leads to Instantly",
     ),
     dry_run: bool = typer.Option(False, "--dry-run", help="List queue size without API calls"),
+    max_cost_usd: float = typer.Option(
+        10.0,
+        "--max-cost-usd",
+        help="Cumulative cap for emails-and-contacts on this preset (default 10).",
+    ),
+    limit: int = typer.Option(
+        0,
+        "--limit",
+        help="Max domains to send. 0 uses the dollar cap only.",
+    ),
 ) -> None:
     """Recover emails for queued no-email businesses via Outscraper emails-and-contacts."""
     preset = _validate_preset(preset)
@@ -841,6 +945,8 @@ def recover_emails_cmd(
             batch_size=batch_size,
             push_to_instantly=push_instantly,
             dry_run=dry_run,
+            max_cost_usd=max_cost_usd,
+            limit=limit,
         )
     )
     typer.secho(
@@ -852,11 +958,50 @@ def recover_emails_cmd(
     )
 
 
+@app.command("enrich-phones")
+def enrich_phones_cmd(
+    execute: bool = typer.Option(
+        False,
+        "--execute",
+        help="Call Outscraper and write phones. Omit to print the cost estimate only.",
+    ),
+    limit: int = typer.Option(1000, help="Maximum cleaned leads to consider."),
+    max_cost_usd: float = typer.Option(
+        10.0,
+        "--max-cost-usd",
+        help="Refuse --execute when the estimate is above this many USD.",
+    ),
+    preset: str = typer.Option("", help="Preset id mapped to a one-word category."),
+    fixture: str = typer.Option("", help="JSON fixture of cleaned leads. Skips the production table."),
+    verify: bool = typer.Option(True, "--verify/--no-verify"),
+) -> None:
+    """Retrieve verified phone numbers for cleaned leads. Does not run unless --execute."""
+    from shared.phone_enrichment import cli_main
+
+    argv = ["--limit", str(limit), "--max-cost-usd", str(max_cost_usd)]
+    if execute:
+        argv.append("--execute")
+    if preset:
+        argv.extend(["--preset", preset])
+    if fixture:
+        argv.extend(["--fixture", _resolve_cli_path(fixture)])
+    if not verify:
+        argv.append("--no-verify")
+    raise typer.Exit(cli_main(argv))
+
+
 @app.command("push-instantly")
 def push_instantly_cmd(
     preset: str = PresetOption,
 ) -> None:
     """Push CSV rows to Instantly (native duplicate skip via skip_if_in_campaign/list)."""
+    from shared.central_leads import uncleaned_instantly_push_allowed
+
+    if not uncleaned_instantly_push_allowed():
+        raise typer.BadParameter(
+            "Refusing to push uncleaned leads to Instantly. "
+            "Clean them first (status=cleaned), or set HERCULE_ALLOW_UNCLEANED_INSTANTLY_PUSH=1."
+        )
     preset = _validate_preset(preset)
     paths = output_paths(preset)
     config = load_config(preset)

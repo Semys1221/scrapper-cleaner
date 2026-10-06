@@ -1,0 +1,132 @@
+-- PROPOSED ONLY. DO NOT APPLY to production.
+--
+-- This file is not registered with Supabase and is not applied by this change.
+-- github.com/Semys1221/hercule.dev returned 404 to the agent that prepared it,
+-- so columns the Next.js app can still read are NOT dropped. Applying the
+-- statements below would race the agent that is removing in-house email and
+-- the agent that is creating the central leads table.
+--
+-- The scraper/cleaner writes into public.leads (created by hercule.dev).
+-- This repository does not CREATE that table.
+
+-- ---------------------------------------------------------------------------
+-- Central leads contract: hercule.dev 026_leads.sql (final)
+-- ---------------------------------------------------------------------------
+-- Unique key: email_normalized GENERATED ALWAYS AS (lower(btrim(email))) STORED.
+-- This pipeline does not write email_normalized.
+-- Upsert: migrations/proposed/030_leads_upsert_uncleaned.sql (apply after 026).
+--   ON CONFLICT (email_normalized)
+--   status moves only when lead_status_rank(incoming) is higher
+--   category kept unless null; empty name/company/website/phone filled
+--   payload JSONB merged, existing keys kept
+-- Scraped rows: source='scrape', source_name='outscraper', status_source='list_payload'
+-- Cleaner: status='cleaned', status_source='manual' where status is still uncleaned
+
+-- ---------------------------------------------------------------------------
+-- BEFORE: outreach_leads (871 rows on 2026-10-06)
+-- ---------------------------------------------------------------------------
+-- id, email, niche_slug, instantly_lead_id, instantly_thread_id, status,
+-- sequence_step, total_sequence_steps, next_scheduled_send_at, last_sent_at,
+-- metadata, company_name, contact_name, created_at, updated_at, email_from,
+-- verticale_id, situation_id, send_locked, reply_agent_eligible_at,
+-- sending_lock_until, has_replied, reply_agent_last_sent_at,
+-- positive_anchor_at, subsequence_step
+--
+-- AFTER (only once hercule.dev no longer reads these columns AND rows have
+-- been copied onto public.leads): the core set
+-- id, email, first_name, last_name, company, website, phone, category, status,
+-- source, source_id, created_at, updated_at
+-- mapped from contact_name / company_name / niche_slug. Do not drop the
+-- columns in place; the other agent owns that migration.
+
+-- ---------------------------------------------------------------------------
+-- BEFORE: client_leads (0 rows) — inbound form, not the scrape pipeline
+-- ---------------------------------------------------------------------------
+-- id, client_id, email, name, phone, message, source_url,
+-- client_notified_at, lead_ack_sent_at, created_at, updated_at
+--
+-- AFTER, if hercule.dev confirms the ack mailer is gone:
+-- id, client_id, email, name, phone, message, created_at, updated_at
+-- source_url stays if the public form still stores the landing URL.
+
+-- ---------------------------------------------------------------------------
+-- Proof gathered in scrapper-cleaner and in the database catalog
+-- ---------------------------------------------------------------------------
+-- Repo grep (identifier, *.py/*.md/*.yml/*.sql/*.json, excluding .venv):
+--   niche_slug, instantly_thread_id, sequence_step, total_sequence_steps,
+--   next_scheduled_send_at, last_sent_at, contact_name, email_from,
+--   verticale_id, situation_id, send_locked, reply_agent_eligible_at,
+--   sending_lock_until, has_replied, reply_agent_last_sent_at,
+--   positive_anchor_at, subsequence_step,
+--   client_notified_at, lead_ack_sent_at,
+--   scrape_known_lists.contacted_count, reply_count, positive_count,
+--   last_seen_at, total_leads,
+--   scrape_niches.tam_limit, scraped_count, evaluated_at, target_list_id,
+--   target_list_name,
+--   scrape_jobs.external_id, leads_found, niche_slug
+--   -> 0 matches.
+-- False friends (not column uses):
+--   source_url matches scraper/company_registry/sirene_build.py and main.py
+--     (SIRENE stock download), not client_leads.source_url.
+--   metadata matches n8n/bootstrap helpers, not outreach_leads.metadata.
+--   message matches log strings, not client_leads.message.
+--   instantly_lead_id and company_name ARE referenced (Instantly push/clean).
+-- Database catalog on project mounpgwswklrykqdddog:
+--   views: none
+--   public functions: outreach_set_updated_at only (touches updated_at)
+--   triggers: outreach_leads_set_updated_at, scrape_niches_set_updated_at,
+--     clean_jobs_set_updated_at
+--   outreach_leads.id is referenced by outreach_send_log and
+--     outreach_reply_agent_queue
+--   niche_slug is duplicated on outreach_send_log, outreach_niche_scheduling_links
+--     (primary key), outreach_grok_prompts (primary key), scrape_jobs
+-- Population (not proof of code use, but proof the columns are live data):
+--   niche_slug 871/871, instantly_thread_id 870/871, email_from 870/871,
+--   metadata non-empty 871/871, send_locked true 742/871,
+--   sending_lock_until 0/871, reply_agent_last_sent_at 0/871
+-- hercule.dev source: NOT GREPPED (repository 404). The operator UI
+-- (app/interne/scrape, app/api/scrape/*, app/api/clean/*, reply agent)
+-- is the likely reader of scrape_* and outreach_* columns.
+
+-- ---------------------------------------------------------------------------
+-- Proposed drops — COMMENTED. Uncomment only after a hercule.dev grep shows
+-- zero references, including the in-house mailer removal and the reply agent.
+-- ---------------------------------------------------------------------------
+-- alter table public.client_leads drop column if exists lead_ack_sent_at;
+-- alter table public.client_leads drop column if exists client_notified_at;
+--
+-- The outreach_leads sender/reply columns below are unreferenced in
+-- scrapper-cleaner and unreferenced by views, but they are populated and
+-- belong to the reply-agent / in-house sender work happening in hercule.dev.
+-- They are listed so that agent can drop them with the mailer, not from here.
+--
+-- alter table public.outreach_leads drop column if exists sequence_step;
+-- alter table public.outreach_leads drop column if exists total_sequence_steps;
+-- alter table public.outreach_leads drop column if exists next_scheduled_send_at;
+-- alter table public.outreach_leads drop column if exists last_sent_at;
+-- alter table public.outreach_leads drop column if exists email_from;
+-- alter table public.outreach_leads drop column if exists verticale_id;
+-- alter table public.outreach_leads drop column if exists situation_id;
+-- alter table public.outreach_leads drop column if exists send_locked;
+-- alter table public.outreach_leads drop column if exists reply_agent_eligible_at;
+-- alter table public.outreach_leads drop column if exists sending_lock_until;
+-- alter table public.outreach_leads drop column if exists has_replied;
+-- alter table public.outreach_leads drop column if exists reply_agent_last_sent_at;
+-- alter table public.outreach_leads drop column if exists positive_anchor_at;
+-- alter table public.outreach_leads drop column if exists subsequence_step;
+-- alter table public.outreach_leads drop column if exists instantly_thread_id;
+-- alter table public.outreach_leads drop column if exists niche_slug;
+--   blocked: niche_slug is a key on outreach_niche_scheduling_links,
+--   outreach_grok_prompts, outreach_send_log, and scrape_jobs.
+--
+-- scrape_known_lists.contacted_count, reply_count, positive_count are
+-- unreferenced in this repo. They are list-health counters for /interne/scrape.
+-- Do not drop them until that UI stops selecting them.
+
+-- Guard: if this file is executed, abort before any change.
+do $$
+begin
+  raise exception
+    'Refusing to apply 20261006_lead_column_prune.sql. '
+    'hercule.dev was not grepped (repo 404). Review the commented drops first.';
+end $$;

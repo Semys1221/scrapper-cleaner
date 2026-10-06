@@ -1151,33 +1151,40 @@ def csv_push_stats(csv_path: str) -> dict[str, int]:
 
 
 def _lead_payload(row: dict[str, str], list_id: str) -> dict[str, Any]:
+    """Instantly lead body. Only core fields plus phone/category/status."""
+    from shared.central_leads import (
+        category_for_preset,
+        core_instantly_custom_variables,
+        normalize_phone,
+    )
+
     company = (row.get("Company") or "").strip()
-    return {
+    first_name = (row.get("FirstName") or "").strip() or (company.split()[0] if company else "")
+    last_name = (row.get("LastName") or "").strip()
+    phone = normalize_phone(row.get("Phone") or row.get("phone"))
+    preset = (row.get("Preset") or "").strip()
+    category = (row.get("LeadCategory") or "").strip()
+    if not category and preset:
+        category = category_for_preset(preset)
+    custom_variables = core_instantly_custom_variables(
+        {},
+        phone=phone,
+        category=category,
+        status="uncleaned",
+    )
+    payload: dict[str, Any] = {
         "email": row["Email"],
-        "first_name": company.split()[0] if company else "",
+        "first_name": first_name,
+        "last_name": last_name,
         "company_name": company,
         "website": row.get("Website") or "",
         "list_id": list_id,
-        "custom_variables": {
-            "city": row.get("City") or "",
-            "service": row.get("Service") or "",
-            "niche": row.get("Niche") or "",
-            "subniche": row.get("Subniche") or "",
-            "type": row.get("Type") or "",
-            "category": row.get("Category") or "",
-            "subtypes": row.get("Subtypes") or "",
-            "siret": row.get("Siret") or "",
-            "siren": row.get("Siren") or "",
-            "effectif": row.get("Effectif") or "",
-            "naf": row.get("Naf") or "",
-            "forme_juridique": row.get("FormeJuridique") or "",
-            "annee_creation": row.get("AnneeCreation") or "",
-            "chiffre_affaires": row.get("ChiffreAffaires") or "",
-            "taille_entreprise": row.get("TailleEntreprise") or "",
-            "lead_score": row.get("LeadScore") or "",
-            "tranche_effectif": row.get("TrancheEffectif") or "",
-        },
     }
+    if phone:
+        payload["phone"] = phone
+    if custom_variables:
+        payload["custom_variables"] = custom_variables
+    return payload
 
 
 def _parse_add_response(data: Any, batch_size: int) -> dict[str, int]:
@@ -1268,6 +1275,7 @@ async def push_leads_to_list(
     skip_if_in_campaign: bool = True,
     skip_if_in_list: bool = True,
     log_cb: Callable[[str], None] | None = None,
+    cleaned: bool = False,
 ) -> dict[str, int]:
     """Upload leads to a list; Instantly skips duplicates via skip_if_in_* flags."""
     if not api_key or not list_id or not leads:
@@ -1277,6 +1285,9 @@ async def push_leads_to_list(
             "skipped_duplicate": 0,
             "failed": 0,
         }
+    from shared.central_leads import refuse_uncleaned_instantly_push
+
+    refuse_uncleaned_instantly_push(cleaned=cleaned)
 
     to_upload: list[dict[str, Any]] = []
     for row in leads:

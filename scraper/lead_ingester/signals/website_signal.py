@@ -6,7 +6,7 @@ import re
 from typing import Any
 
 import trafilatura
-from selectolax.parser import HTMLParser
+from selectolax.lexbor import LexborHTMLParser
 
 from lead_ingester.models import SignalResult
 
@@ -23,7 +23,7 @@ def extract_text(html: str) -> str:
     )
     if text is None or len(text) < 100:
         try:
-            tree = HTMLParser(html)
+            tree = LexborHTMLParser(html)
             body = tree.body
             fallback = body.text(separator=" ", strip=True) if body is not None else ""
             if len(fallback) > len(text or ""):

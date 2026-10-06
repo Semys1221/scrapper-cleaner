@@ -1,67 +1,38 @@
-"""Supabase persistence for migrated Instantly leads."""
+"""Persist leads on the central Supabase ``leads`` table.
+
+``temporary_leads`` is not part of the schema. Scraped and imported rows are
+written as ``uncleaned`` on ``public.leads`` (owned by hercule.dev).
+"""
 
 from __future__ import annotations
 
 import os
-from functools import lru_cache
+import sys
 from typing import Any, Callable
 
-from supabase import Client, create_client
+_REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
 
-TABLE_NAME = "temporary_leads"
-UPSERT_BATCH_SIZE = 500
+from shared.central_leads import (  # noqa: E402
+    LEADS_TABLE,
+    instantly_item_to_lead,
+    supabase_store_from_env,
+)
 
-
-def _env(name: str) -> str:
-    value = os.getenv(name, "").strip()
-    if len(value) >= 2 and value[0] == value[-1] and value[0] in ('"', "'"):
-        return value[1:-1].strip()
-    return value
-
-
-@lru_cache(maxsize=1)
-def get_client() -> Client:
-    url = _env("SUPABASE_URL") or _env("NEXT_PUBLIC_SUPABASE_URL")
-    key = _env("SUPABASE_SERVICE_ROLE_KEY")
-    if not url or not key:
-        raise ValueError("SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY are required")
-    return create_client(url, key)
-
-
-def count_temporary_leads(source_list_id: str) -> int:
-    client = get_client()
-    resp = (
-        client.table(TABLE_NAME)
-        .select("id", count="exact")
-        .eq("source_list_id", source_list_id.strip())
-        .execute()
-    )
-    return int(resp.count or 0)
-
-
-def upsert_temporary_leads(rows: list[dict[str, Any]]) -> int:
-    if not rows:
-        return 0
-    client = get_client()
-    written = 0
-    for start in range(0, len(rows), UPSERT_BATCH_SIZE):
-        batch = rows[start : start + UPSERT_BATCH_SIZE]
-        client.table(TABLE_NAME).upsert(
-            batch,
-            on_conflict="email,source_list_id",
-        ).execute()
-        written += len(batch)
-    return written
+TABLE_NAME = LEADS_TABLE
 
 
 def export_list_leads_to_supabase(
     leads: list[dict[str, Any]],
     list_id: str,
     *,
+    category: str,
     dry_run: bool = True,
     log_cb: Callable[[str], None] | None = None,
+    store: Any | None = None,
 ) -> dict[str, int]:
-    from instantly_client import lead_item_to_row
+    """Upsert Instantly lead payloads as uncleaned central rows for ``category``."""
 
     def _log(msg: str) -> None:
         if log_cb:
@@ -70,29 +41,33 @@ def export_list_leads_to_supabase(
     rows: list[dict[str, Any]] = []
     skipped = 0
     for item in leads:
-        row = lead_item_to_row(item, list_id)
+        row = instantly_item_to_lead(item, category=category)
         if row is None:
             skipped += 1
             continue
+        if list_id:
+            row["instantly_list_id"] = list_id.strip()
         rows.append(row)
 
-    if dry_run:
-        _log(f"Dry-run — {len(rows)} lead(s) would be upserted ({skipped} skipped without email).")
+    target = store if store is not None else supabase_store_from_env()
+    if dry_run or target is None:
+        reason = "dry-run" if dry_run else "supabase unconfigured"
+        _log(f"{reason} — {len(rows)} lead(s) would be upserted ({skipped} skipped without email).")
         return {
             "instantly_total": len(leads),
             "exportable": len(rows),
             "skipped": skipped,
             "upserted": 0,
-            "supabase_total": count_temporary_leads(list_id) if rows else 0,
         }
 
-    upserted = upsert_temporary_leads(rows)
-    supabase_total = count_temporary_leads(list_id)
-    _log(f"Upserted {upserted} lead(s) to {TABLE_NAME} (Supabase total: {supabase_total}).")
+    stats = target.upsert_uncleaned(rows)
+    upserted = int(stats.get("inserted", 0)) + int(stats.get("updated", 0))
+    _log(f"Upserted {upserted} lead(s) to {TABLE_NAME}.")
     return {
         "instantly_total": len(leads),
         "exportable": len(rows),
         "skipped": skipped,
         "upserted": upserted,
-        "supabase_total": supabase_total,
+        "inserted": int(stats.get("inserted", 0)),
+        "updated": int(stats.get("updated", 0)),
     }

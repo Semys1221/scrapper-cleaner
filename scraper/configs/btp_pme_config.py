@@ -171,7 +171,7 @@ BTP_PME_CONFIG = {
     "SCRAPE_RELOAD_START_GEO_PHASE": "pass",
     "SCRAPE_RELOAD_START_QUERY_PASS": 0,
     # ── Target / pipeline ─────────────────────────────────────────────────────
-    "TARGET_LEADS": 100,
+    "TARGET_LEADS": 3000,
     "TARGET_MODE": "instantly_pushed_run",
     "INSTANTLY_PUSH_EVERY": 25,
     "SERVICE_DEFAULT": "BTP / rénovation",

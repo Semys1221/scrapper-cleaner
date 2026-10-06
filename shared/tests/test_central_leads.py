@@ -1,0 +1,569 @@
+"""Central leads contract: category, status, and idempotent upsert."""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+from shared.central_leads import (
+    LEADS_CONFLICT_TARGET,
+    LEADS_UPSERT_RPC,
+    STATUS_CLEANED,
+    STATUS_IN_CAMPAIGN,
+    STATUS_UNCLEANED,
+    InMemoryLeadsStore,
+    SupabaseLeadsStore,
+    category_for_preset,
+    core_instantly_custom_variables,
+    mark_emails_cleaned,
+    merge_uncleaned,
+    scraped_row_to_lead,
+)
+
+
+def test_category_for_preset_matches_hercule_names() -> None:
+    assert category_for_preset("plombier") == "PLOMBIER"
+    assert category_for_preset("avocats") == "AVOCAT"
+    assert category_for_preset("cabinets_expertise_comptable") == "COMPTABLE"
+    assert category_for_preset("installateurs_pac_rge") == "CLIM"
+    assert category_for_preset("cabinets_conseiller_financier") == "CIF"
+    assert category_for_preset("architectes_dplg") == "ARCHITECTURE"
+    assert category_for_preset("conseillers_gestion_patrimoine") == "CIF"
+    assert category_for_preset("kinesitherapeutes") == "PARAMEDICAL"
+    assert category_for_preset("courtiers_credit_immobilier") == "COURTIER"
+    assert category_for_preset("courtiers_prevoyance_b2b") == "IAS"
+    assert category_for_preset("runbook_test") == "TEST"
+    assert category_for_preset("biggy_agency") == "ADHOC"
+
+
+def test_unknown_preset_does_not_guess_a_category() -> None:
+    import pytest
+
+    with pytest.raises(ValueError, match="Unknown preset"):
+        category_for_preset("not_a_real_niche_plombier")
+
+
+def test_scraped_row_is_uncleaned() -> None:
+    lead = scraped_row_to_lead(
+        {
+            "Email": "Jean@Dupont.fr",
+            "Company": "Dupont Plomberie",
+            "Website": "https://dupont.fr",
+            "Phone": "+33 1 84 80 12 34",
+            "PlaceId": "place-1",
+            "FirstName": "Jean",
+            "LastName": "Dupont",
+            "City": "Lyon",
+            "Siret": "12345678901234",
+            "Naf": "43.22A",
+        },
+        preset="plombier",
+    )
+    assert lead["email"] == "jean@dupont.fr"
+    assert "email_normalized" not in lead
+    assert lead["category"] == "PLOMBIER"
+    assert lead["niche_slug"] == "plombier"
+    assert lead["status"] == STATUS_UNCLEANED
+    assert lead["status_source"] == "list_payload"
+    assert lead["phone"] == "+33184801234"
+    assert lead["source"] == "scrape"
+    assert lead["source_name"] == "outscraper"
+    assert lead["source_id"] == "place-1"
+    assert lead["list_id"] is None
+    assert lead["payload"] == {
+        "city": "Lyon",
+        "siret": "12345678901234",
+        "naf": "43.22A",
+    }
+
+
+def test_upsert_does_not_downgrade_status_or_enriched_phone() -> None:
+    store = InMemoryLeadsStore()
+    lead = scraped_row_to_lead(
+        {"Email": "a@ex.fr", "Company": "A", "Website": "https://a.fr", "Phone": "0612345678"},
+        preset="avocats",
+    )
+    assert store.upsert_uncleaned([lead])["inserted"] == 1
+    stored = store.rows["a@ex.fr"]
+    stored["status"] = STATUS_IN_CAMPAIGN
+    stored["phone"] = "+33600000000"
+    stored["phone_enriched_at"] = "2026-10-06T00:00:00+00:00"
+    again = scraped_row_to_lead(
+        {"Email": "a@ex.fr", "Company": "Renamed", "Website": "https://a.fr", "Phone": "0699999999"},
+        preset="avocats",
+    )
+    stats = store.upsert_uncleaned([again])
+    assert stats["skipped"] == 1
+    assert stored["status"] == STATUS_IN_CAMPAIGN
+    assert stored["phone"] == "+33600000000"
+    assert stored["company"] == "A"
+
+
+def test_cleaner_marks_only_uncleaned_rows() -> None:
+    store = InMemoryLeadsStore()
+    lead = scraped_row_to_lead(
+        {"Email": "a@ex.fr", "Company": "A", "Website": "https://a.fr"},
+        preset="plombier",
+    )
+    store.upsert_uncleaned([lead])
+    result = mark_emails_cleaned(["a@ex.fr"], store=store)
+    assert result["updated"] == 1
+    assert store.rows["a@ex.fr"]["status"] == STATUS_CLEANED
+    assert mark_emails_cleaned(["a@ex.fr"], store=store)["updated"] == 0
+
+
+def test_merge_fills_blank_phone_without_downgrade() -> None:
+    patch = merge_uncleaned(
+        {
+            "status": STATUS_CLEANED,
+            "phone": "",
+            "website": "https://a.fr",
+            "company": "",
+            "category": "PLOMBIER",
+            "phone_enriched_at": None,
+        },
+        {
+            "phone": "+33100000000",
+            "website": "https://other.fr",
+            "company": "X",
+            "category": "AVOCAT",
+            "status": STATUS_UNCLEANED,
+        },
+    )
+    assert patch["phone"] == "+33100000000"
+    assert patch["company"] == "X"
+    assert "status" not in patch
+    assert "website" not in patch
+    assert "category" not in patch
+
+
+def test_duplicate_email_keeps_category_and_fills_empty_fields() -> None:
+    store = InMemoryLeadsStore()
+    first = scraped_row_to_lead(
+        {
+            "Email": "  Jean@Dupont.fr ",
+            "Company": "Dupont",
+            "Website": "dupont.fr",
+            "FirstName": "Jean",
+        },
+        preset="plombier",
+    )
+    second = scraped_row_to_lead(
+        {
+            "Email": "jean@dupont.fr",
+            "Company": "Other Co",
+            "Website": "",
+            "Phone": "0612345678",
+            "LastName": "Dupont",
+            "FirstName": "Jacques",
+        },
+        preset="avocats",
+    )
+    stats = store.upsert_uncleaned([first, second])
+    assert stats["inserted"] == 1
+    assert stats["updated"] == 1
+    assert len(store.rows) == 1
+    row = store.rows["jean@dupont.fr"]
+    assert row["email"] == "jean@dupont.fr"
+    assert row["category"] == "PLOMBIER"
+    assert row["status"] == STATUS_UNCLEANED
+    assert row["company"] == "Dupont"
+    assert row["website"] == "dupont.fr"
+    assert row["first_name"] == "Jean"
+    assert row["last_name"] == "Dupont"
+    assert row["phone"] == "0612345678"
+
+    row["status"] = STATUS_CLEANED
+    third = scraped_row_to_lead(
+        {"Email": "JEAN@dupont.fr", "Company": "Overwrite", "Phone": "0699999999"},
+        preset="notaires",
+    )
+    assert store.upsert_uncleaned([third])["skipped"] == 1
+    assert row["status"] == STATUS_CLEANED
+    assert row["category"] == "PLOMBIER"
+    assert row["company"] == "Dupont"
+    assert row["phone"] == "0612345678"
+
+    row["category"] = None
+    store.upsert_uncleaned([third])
+    assert row["category"] == "NOTAIRE"
+    assert row["status"] == STATUS_CLEANED
+
+
+class _RpcResult:
+    def __init__(self, data: dict) -> None:
+        self.data = data
+
+
+class _RpcClient:
+    def __init__(self, data: dict | None = None) -> None:
+        self.calls: list[tuple[str, dict]] = []
+        self._data = data or {"inserted": 0, "updated": 2}
+
+    def rpc(self, name: str, params: dict) -> "_RpcClient":
+        self.calls.append((name, params))
+        return self
+
+    def execute(self) -> _RpcResult:
+        return _RpcResult(self._data)
+
+
+def test_payload_merge_keeps_existing_keys() -> None:
+    patch = merge_uncleaned(
+        {
+            "status": STATUS_CLEANED,
+            "category": "PLOMBIER",
+            "company": "Dupont",
+            "payload": {"city": "Lyon", "siret": "111"},
+        },
+        {
+            "category": "AVOCAT",
+            "company": "Other",
+            "payload": {"city": "Paris", "naf": "43.22A", "siret": ""},
+        },
+    )
+    assert "category" not in patch
+    assert "company" not in patch
+    assert "status" not in patch
+    assert patch["payload"]["city"] == "Lyon"
+    assert patch["payload"]["siret"] == "111"
+    assert patch["payload"]["naf"] == "43.22A"
+
+
+def test_upsert_sql_matches_email_normalized_contract() -> None:
+    sql_path = (
+        Path(__file__).resolve().parents[2]
+        / "migrations"
+        / "proposed"
+        / "030_leads_upsert_uncleaned.sql"
+    )
+    sql = sql_path.read_text(encoding="utf-8")
+    assert "DO NOT APPLY" in sql
+    assert "ON CONFLICT (email_normalized)" in sql
+    assert "lead_status_rank(EXCLUDED.status)" in sql
+    assert "jsonb_object_agg" in sql
+    insert_list = sql.split("INSERT INTO", 1)[1].split("SELECT", 1)[0]
+    assert "email_normalized" not in insert_list
+    for column in ("first_name", "last_name", "company", "website", "phone"):
+        assert f"NULLIF(btrim(%1$I.{column}), '') IS NULL AND EXCLUDED.{column} IS NOT NULL" in sql
+    assert "status_source = CASE" in sql
+    assert "leads_note_instantly_id_skip" in sql
+    assert (
+        "REVOKE EXECUTE ON FUNCTION public.leads_upsert_uncleaned(jsonb, text, text) "
+        "FROM anon, authenticated;"
+    ) in sql
+    assert LEADS_CONFLICT_TARGET == "email_normalized"
+
+
+def test_niche_slug_fills_only_when_category_matches() -> None:
+    sql_path = (
+        Path(__file__).resolve().parents[2]
+        / "migrations"
+        / "proposed"
+        / "030_leads_upsert_uncleaned.sql"
+    )
+    sql = sql_path.read_text(encoding="utf-8")
+    old_set = "niche_slug = COALESCE(NULLIF(btrim(%1$I.niche_slug), ''), EXCLUDED.niche_slug)"
+    old_where = (
+        "OR (NULLIF(btrim(%1$I.niche_slug), '') IS NULL AND EXCLUDED.niche_slug IS NOT NULL)"
+    )
+    assert old_set not in sql
+    assert old_where not in sql
+    assert sql.count("btrim(%1$I.category) = btrim(EXCLUDED.category)") >= 2
+    assert "WHEN NULLIF(btrim(%1$I.niche_slug), '') IS NOT NULL THEN %1$I.niche_slug" in sql
+    assert "source_name = COALESCE(NULLIF(btrim(%1$I.source_name), ''), EXCLUDED.source_name)" in sql
+    assert "status = CASE" in sql
+    for column in ("first_name", "last_name", "company", "website", "phone", "job_title", "source_id"):
+        assert f"{column} = COALESCE(NULLIF(btrim(%1$I.{column}), ''), EXCLUDED.{column})" in sql
+
+
+def test_supabase_upsert_is_one_conflict_call() -> None:
+    client = _RpcClient()
+    store = SupabaseLeadsStore(client, "leads")
+    incoming = scraped_row_to_lead(
+        {
+            "Email": " jean@dupont.fr ",
+            "Company": "Other",
+            "Website": "other.fr",
+            "Phone": "0612345678",
+            "FirstName": "Jean",
+            "LastName": "Martin",
+        },
+        preset="avocats",
+    )
+    same_batch = scraped_row_to_lead(
+        {"Email": "JEAN@DUPONT.FR", "Company": "Third", "Phone": "0699999999"},
+        preset="notaires",
+    )
+    wildcard = scraped_row_to_lead(
+        {"Email": " A_B%@ex.fr ", "Company": "Wild"},
+        preset="plombier",
+    )
+    stats = store.upsert_uncleaned([incoming, same_batch, wildcard, {"email": "not-an-email"}])
+    assert stats["skipped"] == 1
+    assert len(client.calls) == 1
+    name, params = client.calls[0]
+    assert name == LEADS_UPSERT_RPC
+    assert params["p_conflict_target"] == LEADS_CONFLICT_TARGET
+    assert params["p_table"] == "leads"
+    emails = [row["email"] for row in params["p_rows"]]
+    assert emails == ["jean@dupont.fr", "a_b%@ex.fr"]
+    first = params["p_rows"][0]
+    assert first["category"] == "AVOCAT"
+    assert first["company"] == "Other"
+    assert first["phone"] == "0612345678"
+    assert first["last_name"] == "Martin"
+    assert first["source"] == "scrape"
+    assert "email_normalized" not in first
+    assert "ilike" not in str(params)
+
+
+class _ExactQuery:
+    def __init__(self) -> None:
+        self.filters: list[tuple[str, object]] = []
+
+    def update(self, patch: dict) -> "_ExactQuery":
+        self.patch = patch
+        return self
+
+    def in_(self, key: str, values: list) -> "_ExactQuery":
+        self.filters.append((key, list(values)))
+        return self
+
+    def eq(self, key: str, value: object) -> "_ExactQuery":
+        self.filters.append((key, value))
+        return self
+
+    def execute(self) -> _RpcResult:
+        return _RpcResult({"unused": True})
+
+    def __getattr__(self, name: str):
+        raise AssertionError(f"unexpected query method {name}")
+
+
+class _ExactClient:
+    def __init__(self) -> None:
+        self.query = _ExactQuery()
+
+    def table(self, name: str) -> _ExactQuery:
+        assert name == "leads"
+        return self.query
+
+
+def test_mark_cleaned_uses_exact_normalized_email() -> None:
+    client = _ExactClient()
+    store = SupabaseLeadsStore(client, "leads")
+
+    def execute() -> object:
+        return type("R", (), {"data": [{"id": "1"}, {"id": "2"}]})()
+
+    client.query.execute = execute  # type: ignore[method-assign]
+    stats = store.mark_cleaned([" Jean@Dupont.fr ", "not-an-email", "a_b%@ex.fr"])
+    assert stats == {"updated": 2}
+    assert client.query.filters[0] == ("email_normalized", ["a_b%@ex.fr", "jean@dupont.fr"])
+    assert ("status", STATUS_UNCLEANED) in client.query.filters
+    assert client.query.patch["status_source"] == "manual"
+    assert client.query.patch["status"] == STATUS_CLEANED
+
+
+def test_mark_cleaned_batches_five_thousand_emails() -> None:
+    from shared.central_leads import MARK_CLEANED_BATCH
+
+    class _ChunkQuery:
+        def __init__(self, parent: "_ChunkClient") -> None:
+            self.parent = parent
+            self.values: list[str] = []
+
+        def update(self, patch: dict) -> "_ChunkQuery":
+            assert patch["status"] == STATUS_CLEANED
+            assert patch["status_source"] == "manual"
+            return self
+
+        def in_(self, key: str, values: list) -> "_ChunkQuery":
+            assert key == "email_normalized"
+            self.values = list(values)
+            return self
+
+        def eq(self, key: str, value: object) -> "_ChunkQuery":
+            assert (key, value) == ("status", STATUS_UNCLEANED)
+            return self
+
+        def execute(self) -> object:
+            self.parent.chunks.append(self.values)
+            return type("R", (), {"data": [{"id": email} for email in self.values]})()
+
+    class _ChunkClient:
+        def __init__(self) -> None:
+            self.chunks: list[list[str]] = []
+
+        def table(self, name: str) -> _ChunkQuery:
+            assert name == "leads"
+            return _ChunkQuery(self)
+
+    client = _ChunkClient()
+    store = SupabaseLeadsStore(client, "leads")
+    emails = [f"user{index}@ex.fr" for index in range(5000)]
+    stats = store.mark_cleaned(emails)
+    assert stats["updated"] == 5000
+    assert client.chunks
+    assert all(len(chunk) <= MARK_CLEANED_BATCH for chunk in client.chunks)
+    assert sum(len(chunk) for chunk in client.chunks) == 5000
+    assert len(client.chunks) == (5000 + MARK_CLEANED_BATCH - 1) // MARK_CLEANED_BATCH
+
+
+class _ProbeQuery:
+    def select(self, *_args: object, **_kwargs: object) -> "_ProbeQuery":
+        return self
+
+    def limit(self, _count: int) -> "_ProbeQuery":
+        return self
+
+    def execute(self) -> object:
+        return type("R", (), {"data": []})()
+
+
+class _ProbeClient:
+    def __init__(
+        self,
+        *,
+        rpc_error: Exception | None = None,
+        table_error: Exception | None = None,
+    ) -> None:
+        self.rpc_error = rpc_error
+        self.table_error = table_error
+        self.rpc_calls: list[tuple[str, dict]] = []
+
+    def table(self, name: str) -> _ProbeQuery:
+        assert name == "leads"
+        if self.table_error is not None:
+            raise self.table_error
+        return _ProbeQuery()
+
+    def rpc(self, name: str, params: dict) -> "_ProbeClient":
+        self.rpc_calls.append((name, params))
+        if self.rpc_error is not None:
+            raise self.rpc_error
+        return self
+
+    def execute(self) -> object:
+        return type("R", (), {"data": {"inserted": 0, "updated": 0}})()
+
+
+def test_probe_requires_upsert_rpc() -> None:
+    import pytest
+
+    from shared.central_leads import probe_leads_table
+
+    client = _ProbeClient()
+    probe_leads_table(SupabaseLeadsStore(client, "leads"))
+    assert client.rpc_calls == [
+        (
+            LEADS_UPSERT_RPC,
+            {"p_rows": [], "p_conflict_target": LEADS_CONFLICT_TARGET, "p_table": "leads"},
+        )
+    ]
+    missing = _ProbeClient(rpc_error=RuntimeError("function not found"))
+    with pytest.raises(RuntimeError, match="030_leads_upsert_uncleaned"):
+        probe_leads_table(SupabaseLeadsStore(missing, "leads"))
+
+    class _StatusError(RuntimeError):
+        def __init__(self, status_code: int, message: str) -> None:
+            super().__init__(message)
+            self.status_code = status_code
+
+    with pytest.raises(RuntimeError, match="authentication failed"):
+        probe_leads_table(
+            SupabaseLeadsStore(_ProbeClient(rpc_error=_StatusError(401, "Invalid API key")), "leads")
+        )
+    with pytest.raises(RuntimeError, match="permission denied"):
+        probe_leads_table(
+            SupabaseLeadsStore(
+                _ProbeClient(rpc_error=_StatusError(403, "permission denied for function")),
+                "leads",
+            )
+        )
+    with pytest.raises(RuntimeError, match="Network error"):
+        probe_leads_table(
+            SupabaseLeadsStore(_ProbeClient(rpc_error=ConnectionError("connection timed out")), "leads")
+        )
+
+    missing_table = _ProbeClient(
+        table_error=RuntimeError('relation "public.leads" does not exist (42P01)')
+    )
+    with pytest.raises(RuntimeError, match="apply 026 first") as missing_table_exc:
+        probe_leads_table(SupabaseLeadsStore(missing_table, "leads"))
+    assert "030" not in str(missing_table_exc.value)
+
+    schema_cache = _ProbeClient(
+        table_error=RuntimeError("Could not find the table 'public.leads' in the schema cache (PGRST205)")
+    )
+    with pytest.raises(RuntimeError, match="apply 026 first") as schema_cache_exc:
+        probe_leads_table(SupabaseLeadsStore(schema_cache, "leads"))
+    assert "030" not in str(schema_cache_exc.value)
+
+    for auth_error in (RuntimeError("PGRST301"), RuntimeError("JWSError: malformed JWT")):
+        with pytest.raises(RuntimeError, match="authentication failed") as auth_exc:
+            probe_leads_table(SupabaseLeadsStore(_ProbeClient(rpc_error=auth_error), "leads"))
+        assert "030" not in str(auth_exc.value)
+        assert "apply 026 first" not in str(auth_exc.value)
+
+
+def test_postgres_data_errors_are_permanent() -> None:
+    from postgrest.exceptions import APIError
+
+    from shared.central_leads import is_permanent_data_error, postgres_sqlstate
+
+    too_long = APIError({"message": "value too long", "code": "22001"})
+    untranslatable = APIError({"message": "unsupported unicode escape", "code": "22P05"})
+    check = APIError({"message": "new row violates check constraint", "code": "23514"})
+    unique = APIError({"message": "duplicate key", "code": "23505"})
+    assert postgres_sqlstate(too_long) == "22001"
+    assert postgres_sqlstate(untranslatable) == "22P05"
+    assert is_permanent_data_error(too_long)
+    assert is_permanent_data_error(untranslatable)
+    assert is_permanent_data_error(check)
+    assert is_permanent_data_error(RuntimeError("ERROR: value too long (SQLSTATE 22001)"))
+    assert is_permanent_data_error(RuntimeError("ERROR: value too long for type character varying (22001)"))
+    assert postgres_sqlstate(type("PsycopgError", (Exception,), {"sqlstate": "22P05"})()) == "22P05"
+    assert not is_permanent_data_error(unique)
+    assert not is_permanent_data_error(RuntimeError("schema mismatch"))
+    assert not is_permanent_data_error(RuntimeError("timed out after 22000 ms"))
+    assert postgres_sqlstate(RuntimeError("timed out after 22000 ms")) == ""
+    assert not is_permanent_data_error(RuntimeError("connect failed 127.0.0.1:22001"))
+    assert postgres_sqlstate(RuntimeError("connect failed 127.0.0.1:22001")) == ""
+
+
+def test_supabase_client_is_reused(monkeypatch) -> None:
+    from shared.central_leads import reset_supabase_store_cache, supabase_store_from_env
+
+    created: list[object] = []
+
+    def fake_create(url: str, key: str) -> object:
+        client = object()
+        created.append((url, key, client))
+        return client
+
+    monkeypatch.setenv("SUPABASE_URL", "https://example.supabase.co")
+    monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", "service-role-key")
+    monkeypatch.setattr("supabase.create_client", fake_create)
+    reset_supabase_store_cache()
+    first = supabase_store_from_env()
+    second = supabase_store_from_env()
+    reset_supabase_store_cache()
+    assert first is second
+    assert len(created) == 1
+
+
+def test_instantly_custom_variables_drop_registry_fields() -> None:
+    custom = core_instantly_custom_variables(
+        {"siret": "123", "city": "Lyon", "naf": "43.22A", "category": "plumber"},
+        phone="+33612345678",
+        category="PLOMBIER",
+        status="cleaned",
+        cleaned="valid",
+    )
+    assert custom == {
+        "phone": "+33612345678",
+        "category": "PLOMBIER",
+        "status": "cleaned",
+        "cleaned": "valid",
+    }

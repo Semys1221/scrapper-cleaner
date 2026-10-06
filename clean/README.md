@@ -49,6 +49,7 @@ Requires in repo root `.env`:
 3. Choose run mode (dry / test-50 / full / custom)
 4. Execute: quick pre-filter → MyEmailVerifier → optional list purge → push valid leads
 5. Review results; workspace duplicate check always on during push
+6. Final-clean rows are marked `status=cleaned` on the central Supabase `leads` table (no-op when Supabase is not configured). Instantly receives `phone`, `category`, `status`, and `cleaned` only.
 
 ## MyEmailVerifier CSV format
 

@@ -9,8 +9,11 @@ import logging
 import os
 import re
 import sys
+import threading
 import time
+import weakref
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
@@ -78,12 +81,33 @@ def output_paths(preset: str = "biggy_agency") -> OutputPaths:
 
 _default_paths = output_paths("biggy_agency")
 _active = _default_paths
+_active_preset = "biggy_agency"
 
 
 def activate_output_paths(preset: str = "biggy_agency") -> OutputPaths:
-    global _active
-    _active = output_paths(preset)
+    global _active, _active_preset
+    _active_preset = preset or "biggy_agency"
+    _active = output_paths(_active_preset)
     return _active
+
+
+def _uncleaned_push_allowed() -> bool:
+    from shared.central_leads import uncleaned_instantly_push_allowed
+
+    return uncleaned_instantly_push_allowed()
+
+
+def _apply_uncleaned_push_policy(
+    push_to_instantly: bool,
+    log_cb: Callable[[str], None],
+) -> bool:
+    if _uncleaned_push_allowed():
+        return push_to_instantly
+    if push_to_instantly:
+        log_cb(
+            "Instantly push withheld — uncleaned leads stay in Supabase (status=uncleaned)."
+        )
+    return False
 
 
 # Backward-compatible exports (biggy_agency default paths)
@@ -121,6 +145,10 @@ _CSV_COLUMNS = [
     "LeadScore",
     "RegistrySource",
     "RegistryFetchedAt",
+    "Phone",
+    "FirstName",
+    "LastName",
+    "PlaceId",
 ]
 _FILTER_AUDIT_COLUMNS = ["Email", "Company", "Category", "Verdict", "Reason"]
 _ENRICH_AUDIT_COLUMNS = [
@@ -220,6 +248,211 @@ def outscraper_enrichment(config: dict) -> list[str]:
         text = raw.strip()
         return [text] if text else []
     return [str(item).strip() for item in raw if str(item).strip()]
+
+
+# Google Maps medium tier after the monthly free quota. The free 500 places
+# are not subtracted: a short run must not look free and then bill.
+MAPS_USD_PER_1000 = 3.0
+CONTACTS_USD_PER_1000 = 3.0
+DEFAULT_MAX_SCRAPE_COST_USD = 10.0
+
+
+def _utc_day() -> str:
+    return datetime.now(timezone.utc).date().isoformat()
+
+
+def _places_for_budget(budget_usd: float, usd_per_place: float) -> int:
+    """How many places fit in ``budget_usd`` without rounding past the cap."""
+    if usd_per_place <= 0 or budget_usd <= 0:
+        return 0
+    places = int(round(float(budget_usd) / float(usd_per_place), 6))
+    ceiling = round(float(budget_usd), 4)
+    while places > 0 and round(places * float(usd_per_place), 4) > ceiling:
+        places -= 1
+    return places
+
+
+def _optional_positive_int(config: dict, key: str) -> int | None:
+    raw = config.get(key)
+    if raw is None or raw == "":
+        return None
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return None
+    return value if value > 0 else None
+
+
+_SPEND_STATE_KEYS = (
+    "places_requested_total",
+    "spend_usd_total",
+    "spend_usd_today",
+    "spend_utc_day",
+    "email_recovery_spend_usd",
+)
+
+
+def _carry_recorded_spend(run_state: dict[str, Any], existing_state: dict[str, Any] | None) -> None:
+    """Keep the preset's cumulative Outscraper spend when a new state dict is built."""
+    if not existing_state:
+        return
+    for key in _SPEND_STATE_KEYS:
+        if key in existing_state and existing_state.get(key) not in (None, ""):
+            run_state[key] = existing_state[key]
+
+
+def scrape_spend_snapshot(run_state: dict[str, Any] | None) -> dict[str, float | int]:
+    """Spend already charged on this preset's scrape state."""
+    if not run_state:
+        return {"already_spent_usd": 0.0, "already_places": 0, "spent_today_usd": 0.0}
+    spent_today = 0.0
+    if str(run_state.get("spend_utc_day") or "") == _utc_day():
+        spent_today = float(run_state.get("spend_usd_today") or 0)
+    return {
+        "already_spent_usd": float(run_state.get("spend_usd_total") or 0),
+        "already_places": int(run_state.get("places_requested_total") or 0),
+        "spent_today_usd": spent_today,
+    }
+
+
+def record_scrape_spend(
+    run_state: dict[str, Any] | None,
+    places: int,
+    usd_per_place: float,
+) -> None:
+    """Persist places about to be sent so a crash cannot forget the charge."""
+    if run_state is None or places <= 0:
+        return
+    from scrape_state import save_scrape_state
+
+    today = _utc_day()
+    if str(run_state.get("spend_utc_day") or "") != today:
+        run_state["spend_usd_today"] = 0.0
+        run_state["spend_utc_day"] = today
+    cost = round(int(places) * float(usd_per_place), 4)
+    run_state["places_requested_total"] = int(run_state.get("places_requested_total") or 0) + int(places)
+    run_state["spend_usd_total"] = round(float(run_state.get("spend_usd_total") or 0) + cost, 4)
+    run_state["spend_usd_today"] = round(float(run_state.get("spend_usd_today") or 0) + cost, 4)
+    save_scrape_state(run_state, path=_active.scrape_state)
+
+
+def scrape_spend_plan(
+    config: dict,
+    *,
+    target: int,
+    already_saved: int = 0,
+    already_spent_usd: float = 0.0,
+    already_places: int = 0,
+    spent_today_usd: float = 0.0,
+) -> dict[str, Any]:
+    """Places this invocation may still request, and the true worst-case USD.
+
+    ``--target`` is a lead count. Places are bounded by the dollars still left
+    under ``MAX_SCRAPE_COST_USD`` (and ``MAX_SCRAPE_DAILY_COST_USD`` when set)
+    and by ``MAX_SCRAPE_PLACES`` when set. One maps search is one POST, so
+    ``worst_case_usd`` is places times the per-place rate. ``refused`` means a
+    fresh run cannot afford a single place. ``budget_exhausted`` means earlier
+    spend on this preset state already used the cap.
+    """
+    raw_cap = config.get("MAX_SCRAPE_COST_USD", DEFAULT_MAX_SCRAPE_COST_USD)
+    try:
+        max_cost = float(raw_cap)
+    except (TypeError, ValueError):
+        max_cost = DEFAULT_MAX_SCRAPE_COST_USD
+    if max_cost < 0:
+        max_cost = 0.0
+    contacts = bool(outscraper_enrichment(config))
+    per_thousand = MAPS_USD_PER_1000 + (CONTACTS_USD_PER_1000 if contacts else 0.0)
+    usd_per_place = per_thousand / 1000.0
+    remaining_leads = max(int(target) - int(already_saved), 0)
+    remaining_budget = max(max_cost - float(already_spent_usd), 0.0)
+    daily_raw = config.get("MAX_SCRAPE_DAILY_COST_USD")
+    if daily_raw is not None and str(daily_raw).strip() != "":
+        try:
+            daily_left = max(float(daily_raw) - float(spent_today_usd), 0.0)
+        except (TypeError, ValueError):
+            daily_left = remaining_budget
+        remaining_budget = min(remaining_budget, daily_left)
+    by_cost = _places_for_budget(remaining_budget, usd_per_place)
+    places = by_cost
+    max_places = _optional_positive_int(config, "MAX_SCRAPE_PLACES")
+    if max_places is not None:
+        places = min(places, max(max_places - int(already_places), 0))
+    fresh = (
+        float(already_spent_usd) <= 0
+        and int(already_places) <= 0
+        and float(spent_today_usd) <= 0
+    )
+    refused = remaining_leads > 0 and places < 1 and fresh
+    return {
+        "places": places,
+        "by_cost": by_cost,
+        "target_remaining": remaining_leads,
+        "worst_case_usd": round(places * usd_per_place, 4),
+        "max_cost_usd": max_cost,
+        "usd_per_place": usd_per_place,
+        "usd_per_thousand": per_thousand,
+        "contacts": contacts,
+        "already_spent_usd": round(float(already_spent_usd), 4),
+        "already_places": int(already_places),
+        "refused": refused,
+        "budget_exhausted": (not refused) and places < 1 and remaining_leads > 0,
+    }
+
+
+def format_scrape_spend(plan: dict[str, Any]) -> str:
+    from shared.phone_enrichment import format_usd
+
+    contacts = ""
+    if plan.get("contacts"):
+        contacts = f" + ${format_usd(CONTACTS_USD_PER_1000)}/1,000 contacts enrichment"
+    line = (
+        f"Scrape spend cap — at most {int(plan['places'])} places, "
+        f"worst case ${format_usd(float(plan['worst_case_usd']))} "
+        f"(${format_usd(MAPS_USD_PER_1000)}/1,000 Google Maps{contacts}, "
+        f"medium tier, monthly free quota not applied). "
+        f"Cap ${format_usd(float(plan['max_cost_usd']))}."
+    )
+    already = float(plan.get("already_spent_usd") or 0)
+    if already > 0:
+        line += (
+            f" Already spent ${format_usd(already)} "
+            f"({int(plan.get('already_places') or 0)} places) on this run."
+        )
+    return line
+
+
+def next_worker_wait(
+    *,
+    progressed: bool,
+    budget_exhausted: bool,
+    streak: int,
+    sleep_s: int,
+) -> tuple[int, float | None]:
+    """Seconds to sleep before the next worker iteration.
+
+    ``None`` means stop: the preset budget is exhausted. Zero progress backs
+    off from 30s up to 15 minutes. Progress resets the streak.
+    """
+    if budget_exhausted:
+        return streak, None
+    if not progressed:
+        new_streak = int(streak) + 1
+        delay = min(max(float(sleep_s) * (2 ** min(new_streak, 6)), 30.0), 900.0)
+        return new_streak, delay
+    if sleep_s > 0:
+        return 0, float(sleep_s)
+    return 0, 0.0
+
+
+def _refuse_scrape_over_budget(plan: dict[str, Any]) -> None:
+    from shared.phone_enrichment import format_usd
+
+    raise SystemExit(
+        "Refusing scrape: worst case for one place "
+        f"(${format_usd(float(plan['usd_per_place']))}) exceeds --max-cost-usd "
+        f"{format_usd(float(plan['max_cost_usd']))}."
+    )
 
 
 def outscraper_request_language(config: dict) -> str:
@@ -483,13 +716,706 @@ def _sync_mev_emails_sidecar(log_cb: Callable[[str], None] | None = None) -> int
     return count
 
 
-def _append_lead_row(row: dict[str, str]) -> None:
+def _csv_fieldnames(path: str) -> list[str]:
+    if os.path.isfile(path) and os.path.getsize(path) > 0:
+        with open(path, encoding="utf-8", newline="") as handle:
+            header = next(csv.reader(handle), [])
+        if header:
+            return header
+    return list(_CSV_COLUMNS)
+
+
+class LeadPersistenceError(RuntimeError):
+    """A Supabase lead save failed. The scrape stops so resume can retry it."""
+
+
+class LeadRejectionStormError(LeadPersistenceError):
+    """Too many rows can never be stored. The live leads schema is the likely cause."""
+
+
+# Supabase saves are batched so the async loop is not blocked on every row.
+# The leads CSV is written only after the batch upsert succeeds. Rows still
+# waiting live in pending_supabase.jsonl so a failed save is retried on resume
+# instead of being treated as already scraped. A row that can never be stored
+# (validation, email longer than 320, SQLSTATE class 22, check violation
+# 23514) is moved to pending_supabase.rejected.jsonl.
+#
+# A row is rejected only after its own one-row request fails with a permanent
+# code. Untested rows stay in pending_supabase.jsonl; they are not rejects and
+# do not count toward the stop. One flush spends at most
+# MAX_SUPABASE_CALLS_PER_FLUSH Supabase calls, then the lock is released and
+# another pass continues. A single proven bad row never stops the run. The
+# run stops when HERCULE_REJECT_CONSECUTIVE new rejects happen with no
+# successful save between them, or when the proven-reject ratio trips.
+# SQLSTATE class 22 and check 23514 rows in rejected.jsonl are retried on the
+# next startup; a later successful save removes them from that file.
+#
+# Each event loop has its own asyncio.Lock (a lock cannot move across loops).
+# The buffer itself is guarded by _FLUSH_THREAD_LOCK, so two loops in two
+# threads still exclude each other. Never take the asyncio lock from a
+# synchronous caller.
+LEAD_SAVE_BATCH = 50
+MAX_SUPABASE_CALLS_PER_FLUSH = 32
+REJECT_STOP_RATIO = 0.20
+REJECT_MIN_SAMPLE = 50
+REJECT_CONSECUTIVE = 10
+_RETRIABLE_REJECT_RE = re.compile(r"^(22[0-9A-Z]{3}|23514)\b")
+_PENDING_LEAD_ROWS: list[dict[str, str]] = []
+_COMMITTED_EMAILS: set[str] | None = None
+_COMMITTED_EMAILS_PATH: str | None = None
+_REJECTED_EMAILS: set[str] = set()
+_REJECTED_INDEX_PATH: str | None = None
+_RUN_SAVED_EMAILS: set[str] = set()
+_RUN_COUNTED_REJECTS: set[str] = set()
+_RUN_SAVED = 0
+_RUN_REJECTED = 0
+_RUN_CONSECUTIVE_REJECTS = 0
+_FLUSH_THREAD_LOCK = threading.Lock()
+_FLUSH_ASYNC_LOCKS: weakref.WeakKeyDictionary[
+    asyncio.AbstractEventLoop, asyncio.Lock
+] = weakref.WeakKeyDictionary()
+_FLUSH_ASYNC_LOCKS_GUARD = threading.Lock()
+
+
+def _flush_async_lock() -> asyncio.Lock:
+    """Return this loop's flush lock. A different loop keeps its own lock."""
+    loop = asyncio.get_running_loop()
+    with _FLUSH_ASYNC_LOCKS_GUARD:
+        lock = _FLUSH_ASYNC_LOCKS.get(loop)
+        if lock is None:
+            lock = asyncio.Lock()
+            _FLUSH_ASYNC_LOCKS[loop] = lock
+        return lock
+
+
+def _reset_lead_save_buffer() -> None:
+    global _COMMITTED_EMAILS, _COMMITTED_EMAILS_PATH, _REJECTED_INDEX_PATH
+    global _RUN_SAVED, _RUN_REJECTED, _RUN_CONSECUTIVE_REJECTS
+    _PENDING_LEAD_ROWS.clear()
+    _COMMITTED_EMAILS = None
+    _COMMITTED_EMAILS_PATH = None
+    _REJECTED_EMAILS.clear()
+    _REJECTED_INDEX_PATH = None
+    _RUN_SAVED_EMAILS.clear()
+    _RUN_COUNTED_REJECTS.clear()
+    _RUN_SAVED = 0
+    _RUN_REJECTED = 0
+    _RUN_CONSECUTIVE_REJECTS = 0
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = None
+    with _FLUSH_ASYNC_LOCKS_GUARD:
+        if loop is None:
+            _FLUSH_ASYNC_LOCKS.clear()
+        else:
+            _FLUSH_ASYNC_LOCKS[loop] = asyncio.Lock()
+
+
+def _reject_stop_ratio() -> float:
+    raw = os.getenv("HERCULE_REJECT_STOP_RATIO", "").strip()
+    if not raw:
+        return REJECT_STOP_RATIO
+    return float(raw)
+
+
+def _reject_min_sample() -> int:
+    raw = os.getenv("HERCULE_REJECT_MIN_SAMPLE", "").strip()
+    if not raw:
+        return REJECT_MIN_SAMPLE
+    return max(int(raw), 1)
+
+
+def _reject_consecutive_limit() -> int:
+    raw = os.getenv("HERCULE_REJECT_CONSECUTIVE", "").strip()
+    if not raw:
+        return REJECT_CONSECUTIVE
+    return max(int(raw), 1)
+
+
+def _sidecar_path() -> str:
+    return os.path.join(os.path.dirname(_active.csv), "pending_supabase.jsonl")
+
+
+def _rejected_sidecar_path() -> str:
+    return os.path.join(os.path.dirname(_active.csv), "pending_supabase.rejected.jsonl")
+
+
+def _public_lead_row(row: dict[str, Any]) -> dict[str, Any]:
+    return {key: value for key, value in row.items() if not str(key).startswith("_")}
+
+
+def _load_unpersisted_leads() -> list[dict[str, str]]:
+    path = _sidecar_path()
+    if not os.path.isfile(path):
+        return []
+    rows: list[dict[str, str]] = []
+    seen: set[str] = set()
+    with open(path, encoding="utf-8") as handle:
+        for line in handle:
+            text = line.strip()
+            if not text:
+                continue
+            item = json.loads(text)
+            if not isinstance(item, dict):
+                continue
+            email = str(item.get("Email") or "").strip().lower()
+            if email and email in seen:
+                continue
+            if email:
+                seen.add(email)
+            rows.append(item)
+    return rows
+
+
+def _rewrite_sidecar(rows: list[dict[str, Any]]) -> None:
+    path = _sidecar_path()
+    if not rows:
+        if os.path.isfile(path):
+            os.remove(path)
+        return
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as handle:
+        for row in rows:
+            handle.write(json.dumps(_public_lead_row(row), ensure_ascii=False) + "\n")
+
+
+def _append_sidecar(row: dict[str, Any]) -> None:
+    path = _sidecar_path()
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "a", encoding="utf-8") as handle:
+        handle.write(json.dumps(_public_lead_row(row), ensure_ascii=False) + "\n")
+
+
+def _write_csv_row(row: dict[str, str]) -> None:
+    fieldnames = _csv_fieldnames(_active.csv)
     write_header = not os.path.exists(_active.csv) or os.path.getsize(_active.csv) == 0
-    with open(_active.csv, "a", encoding="utf-8", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=_CSV_COLUMNS)
+    os.makedirs(os.path.dirname(_active.csv), exist_ok=True)
+    with open(_active.csv, "a", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames, extrasaction="ignore")
         if write_header:
             writer.writeheader()
-        writer.writerow({col: row.get(col, "") for col in _CSV_COLUMNS})
+        writer.writerow({col: row.get(col, "") for col in fieldnames})
+
+
+def _committed_emails() -> set[str]:
+    """Emails already in the leads CSV. Loaded once per file, then kept in memory."""
+    global _COMMITTED_EMAILS, _COMMITTED_EMAILS_PATH
+    path = _active.csv
+    if _COMMITTED_EMAILS is None or _COMMITTED_EMAILS_PATH != path:
+        seen, _domains = _load_seen_from_csv()
+        _COMMITTED_EMAILS = set(seen)
+        _COMMITTED_EMAILS_PATH = path
+    return _COMMITTED_EMAILS
+
+
+def _row_email(row: dict[str, Any]) -> str:
+    return str(row.get("Email") or row.get("email") or "").strip().lower()
+
+
+def _row_permanent_error(row: dict[str, Any]) -> str | None:
+    """Validation failures that will never succeed on retry."""
+    from shared.central_leads import scraped_row_to_lead
+
+    try:
+        scraped_row_to_lead(row, preset=_active_preset)
+    except ValueError as exc:
+        return str(exc)
+    return None
+
+
+def _ensure_rejected_index() -> None:
+    """Load rejected emails once per output path so repeats are not appended."""
+    global _REJECTED_INDEX_PATH
+    path = _rejected_sidecar_path()
+    if _REJECTED_INDEX_PATH == path:
+        return
+    _REJECTED_EMAILS.clear()
+    _REJECTED_INDEX_PATH = path
+    if not os.path.isfile(path):
+        return
+    with open(path, encoding="utf-8") as handle:
+        for line in handle:
+            text = line.strip()
+            if not text:
+                continue
+            try:
+                item = json.loads(text)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(item, dict):
+                email = _row_email(item)
+                if email:
+                    _REJECTED_EMAILS.add(email)
+
+
+def _append_rejected_row(row: dict[str, Any], error: str, *, count_toward_stop: bool = False) -> bool:
+    """Append one rejected lead. The same email_normalized is written once."""
+    global _RUN_REJECTED
+    _ensure_rejected_index()
+    email = _row_email(row)
+    if email and email in _REJECTED_EMAILS:
+        return False
+    path = _rejected_sidecar_path()
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    record = _public_lead_row(row)
+    record["error"] = error
+    with open(path, "a", encoding="utf-8") as handle:
+        handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+    if email:
+        _REJECTED_EMAILS.add(email)
+    if count_toward_stop:
+        _RUN_REJECTED += 1
+    logger.error("Rejected lead permanently (%s): %s", error, email or row.get("Company"))
+    return True
+
+
+def _separate_permanent_rejects(rows: list[dict[str, str]]) -> list[dict[str, str]]:
+    """Move rows that can never be stored out of the retry sidecar."""
+    saveable: list[dict[str, str]] = []
+    rejected_ids: set[int] = set()
+    for row in rows:
+        error = _row_permanent_error(row)
+        if error is None:
+            saveable.append(row)
+            continue
+        _append_rejected_row(row, error)
+        rejected_ids.add(id(row))
+    if rejected_ids:
+        _PENDING_LEAD_ROWS[:] = [row for row in _PENDING_LEAD_ROWS if id(row) not in rejected_ids]
+        _rewrite_sidecar(_PENDING_LEAD_ROWS)
+    return saveable
+
+
+def _persist_lead_batch(rows: list[dict[str, str]]) -> None:
+    from shared.central_leads import persist_scraped_leads
+
+    persist_scraped_leads(rows, preset=_active_preset)
+
+
+def _commit_saved_lead_rows(batch: list[dict[str, str]]) -> None:
+    """Write the CSV only after the Supabase upsert has returned."""
+    global _RUN_SAVED, _RUN_CONSECUTIVE_REJECTS
+    _RUN_CONSECUTIVE_REJECTS = 0
+    already = _committed_emails()
+    saved_emails: set[str] = set()
+    for row in batch:
+        email = _row_email(row)
+        if email:
+            saved_emails.add(email)
+            if email not in _RUN_SAVED_EMAILS:
+                _RUN_SAVED_EMAILS.add(email)
+                _RUN_SAVED += 1
+        if email and email in already:
+            continue
+        _write_csv_row(row)
+        if email:
+            already.add(email)
+    _drop_rejected_emails(saved_emails)
+    _PENDING_LEAD_ROWS[:] = [
+        row
+        for row in _PENDING_LEAD_ROWS
+        if str(row.get("Email") or "").strip().lower() not in saved_emails
+    ]
+    remaining = [
+        row
+        for row in _load_unpersisted_leads()
+        if str(row.get("Email") or "").strip().lower() not in saved_emails
+    ]
+    _rewrite_sidecar(remaining)
+
+
+def _raise_persistence_error(exc: Exception) -> None:
+    logger.error("Central leads upsert failed: %s", exc)
+    if isinstance(exc, LeadPersistenceError):
+        raise exc
+    raise LeadPersistenceError(str(exc)) from exc
+
+
+def _drop_pending_rows(rows: list[dict[str, Any]]) -> None:
+    dropped = {id(row) for row in rows}
+    emails = {_row_email(row) for row in rows}
+    emails.discard("")
+    _PENDING_LEAD_ROWS[:] = [
+        row
+        for row in _PENDING_LEAD_ROWS
+        if id(row) not in dropped and _row_email(row) not in emails
+    ]
+    _rewrite_sidecar(_PENDING_LEAD_ROWS)
+
+
+def _note_consecutive_reject(email: str) -> None:
+    """Count a newly proven reject. Stop after N with no successful save between them."""
+    global _RUN_CONSECUTIVE_REJECTS
+    if email:
+        _RUN_COUNTED_REJECTS.add(email)
+    _RUN_CONSECUTIVE_REJECTS += 1
+    limit = _reject_consecutive_limit()
+    if _RUN_CONSECUTIVE_REJECTS >= limit:
+        _raise_mass_rejection(
+            f"{_RUN_CONSECUTIVE_REJECTS} consecutive proven rejects with no successful "
+            f"save in between (stop after {limit})."
+        )
+
+
+def _drop_rejected_emails(emails: set[str]) -> None:
+    """A later successful save removes the row from rejected.jsonl."""
+    global _RUN_REJECTED
+    if not emails:
+        return
+    _ensure_rejected_index()
+    removed = {email for email in emails if email in _REJECTED_EMAILS}
+    if not removed:
+        return
+    _REJECTED_EMAILS.difference_update(removed)
+    for email in removed:
+        if email in _RUN_COUNTED_REJECTS:
+            _RUN_COUNTED_REJECTS.discard(email)
+            _RUN_REJECTED = max(_RUN_REJECTED - 1, 0)
+    path = _rejected_sidecar_path()
+    if not os.path.isfile(path):
+        return
+    kept: list[str] = []
+    with open(path, encoding="utf-8") as handle:
+        for line in handle:
+            text = line.strip()
+            if not text:
+                continue
+            try:
+                item = json.loads(text)
+            except json.JSONDecodeError:
+                kept.append(text)
+                continue
+            email = _row_email(item) if isinstance(item, dict) else ""
+            if email and email in removed:
+                continue
+            kept.append(text)
+    if not kept:
+        os.remove(path)
+        return
+    with open(path, "w", encoding="utf-8") as handle:
+        for text in kept:
+            handle.write(text + "\n")
+
+
+def _reject_data_error_rows(rows: list[dict[str, Any]], exc: Exception) -> None:
+    from shared.central_leads import postgres_sqlstate
+
+    code = postgres_sqlstate(exc)
+    label = f"{code}: {exc}" if code else str(exc)
+    for row in rows:
+        fresh = _append_rejected_row(row, label, count_toward_stop=True)
+        _drop_pending_rows([row])
+        if fresh:
+            _note_consecutive_reject(_row_email(row))
+
+
+def _rows_still_open(
+    batch: list[dict[str, str]],
+    done_saved: set[str],
+    done_bad: set[str],
+) -> list[dict[str, str]]:
+    """Rows this bisection has not saved or proven bad. Prior files do not count."""
+    open_rows: list[dict[str, str]] = []
+    for row in batch:
+        email = _row_email(row)
+        if email and (email in done_saved or email in done_bad):
+            continue
+        open_rows.append(row)
+    return open_rows
+
+
+def _remember_saved(rows: list[dict[str, str]], done_saved: set[str]) -> None:
+    for row in rows:
+        email = _row_email(row)
+        if email:
+            done_saved.add(email)
+
+
+def _remember_rejected(rows: list[dict[str, str]], done_bad: set[str]) -> None:
+    for row in rows:
+        email = _row_email(row)
+        if email:
+            done_bad.add(email)
+
+
+def _raise_mass_rejection(detail: str) -> None:
+    message = (
+        f"{detail} This usually means a schema mismatch on the live public.leads database "
+        "(026/030). Fix the schema before resuming; the scrape is stopping with no further "
+        "Outscraper calls."
+    )
+    logger.error("%s", message)
+    raise LeadRejectionStormError(message)
+
+
+def _raise_if_run_reject_ratio() -> None:
+    total = _RUN_SAVED + _RUN_REJECTED
+    minimum = _reject_min_sample()
+    if total < minimum:
+        return
+    share = _RUN_REJECTED / total
+    limit = _reject_stop_ratio()
+    if share > limit:
+        _raise_mass_rejection(
+            f"Rejected {_RUN_REJECTED} of {total} leads ({share:.0%}), "
+            f"above the {limit:.0%} stop threshold (minimum sample {minimum})."
+        )
+
+
+def _probe_permanent_failures(
+    batch: list[dict[str, str]],
+    budget: list[int],
+    done_saved: set[str],
+    done_bad: set[str],
+    last_exc: list[Exception | None],
+) -> bool:
+    """Sample the ends and the middle, each as its own request.
+
+    A failure rejects that one row. A success commits it and proves the batch
+    is not all bad. True means every sample that ran failed, so a small batch
+    can be proven by testing the rest one row at a time.
+    """
+    from shared.central_leads import is_permanent_data_error
+
+    if len(batch) < 2:
+        return False
+    indexes: list[int] = []
+    for index in (0, len(batch) // 2, len(batch) - 1):
+        if index not in indexes:
+            indexes.append(index)
+    tested = 0
+    failures = 0
+    for index in indexes:
+        row = batch[index]
+        email = _row_email(row)
+        if email and (email in done_saved or email in done_bad):
+            continue
+        if budget[0] <= 0:
+            return False
+        budget[0] -= 1
+        tested += 1
+        try:
+            _persist_lead_batch([row])
+        except Exception as exc:
+            if not is_permanent_data_error(exc):
+                _raise_persistence_error(exc)
+            last_exc[0] = exc
+            _reject_data_error_rows([row], exc)
+            _remember_rejected([row], done_bad)
+            failures += 1
+            continue
+        _commit_saved_lead_rows([row])
+        _remember_saved([row], done_saved)
+        return False
+    return tested > 0 and failures == tested
+
+
+def _save_with_budget(
+    batch: list[dict[str, str]],
+    budget: list[int],
+    done_saved: set[str],
+    done_bad: set[str],
+    last_exc: list[Exception | None],
+    *,
+    probe: bool,
+) -> None:
+    """Upsert, splitting permanent data errors until the call budget runs out.
+
+    A row is rejected only when a one-row request fails with a permanent code.
+    Rows still untested when the budget hits zero stay in the retry file.
+    """
+    from shared.central_leads import is_permanent_data_error
+
+    batch = _rows_still_open(batch, done_saved, done_bad)
+    if not batch:
+        return
+    if budget[0] <= 0:
+        return
+    budget[0] -= 1
+    try:
+        _persist_lead_batch(batch)
+    except Exception as exc:
+        if not is_permanent_data_error(exc):
+            _raise_persistence_error(exc)
+        last_exc[0] = exc
+        if len(batch) == 1:
+            _reject_data_error_rows(batch, exc)
+            _remember_rejected(batch, done_bad)
+            return
+        if probe and _probe_permanent_failures(batch, budget, done_saved, done_bad, last_exc):
+            remaining = _rows_still_open(batch, done_saved, done_bad)
+            if remaining and len(remaining) <= budget[0]:
+                for row in remaining:
+                    _save_with_budget(
+                        [row],
+                        budget,
+                        done_saved,
+                        done_bad,
+                        last_exc,
+                        probe=False,
+                    )
+        remaining = _rows_still_open(batch, done_saved, done_bad)
+        if len(remaining) <= 1:
+            if remaining:
+                _save_with_budget(
+                    remaining,
+                    budget,
+                    done_saved,
+                    done_bad,
+                    last_exc,
+                    probe=False,
+                )
+            return
+        mid = max(len(remaining) // 2, 1)
+        _save_with_budget(remaining[:mid], budget, done_saved, done_bad, last_exc, probe=False)
+        _save_with_budget(remaining[mid:], budget, done_saved, done_bad, last_exc, probe=False)
+        return
+    _commit_saved_lead_rows(batch)
+    _remember_saved(batch, done_saved)
+
+
+def _save_pending_batch(batch: list[dict[str, str]]) -> None:
+    """Upsert one capped pass. Isolated rejects do not stop the run.
+
+    The pass shares one call budget. Untested rows stay in the retry file.
+    A run stops only for a streak of proven rejects with no save between
+    them, or for the proven-reject ratio. Emails already stored are sent
+    again; Postgres decides.
+    """
+    if not batch:
+        return
+    pending = list(batch)
+    budget = [MAX_SUPABASE_CALLS_PER_FLUSH]
+    last_exc: list[Exception | None] = [None]
+    while pending and budget[0] > 0:
+        saved_before = _RUN_SAVED
+        rejected_before = _RUN_REJECTED
+        pending_before = len(pending)
+        done_saved: set[str] = set()
+        done_bad: set[str] = set()
+        _save_with_budget(pending, budget, done_saved, done_bad, last_exc, probe=True)
+        untested = _rows_still_open(pending, done_saved, done_bad)
+        saved = _RUN_SAVED - saved_before
+        rejected = _RUN_REJECTED - rejected_before
+        if not untested:
+            break
+        progressed = saved > 0 or rejected > 0 or len(untested) < pending_before
+        if not progressed:
+            _raise_persistence_error(
+                last_exc[0] or RuntimeError("central leads upsert made no progress")
+            )
+        pending = untested
+    _raise_if_run_reject_ratio()
+
+
+def _flush_one_pending_pass() -> bool:
+    """One capped save under the thread lock. True when another pass should run."""
+    with _FLUSH_THREAD_LOCK:
+        if not _PENDING_LEAD_ROWS:
+            return False
+        before_n = len(_PENDING_LEAD_ROWS)
+        before_saved = _RUN_SAVED
+        before_rejected = _RUN_REJECTED
+        batch = _separate_permanent_rejects(list(_PENDING_LEAD_ROWS))
+        if batch:
+            _save_pending_batch(batch)
+        after_n = len(_PENDING_LEAD_ROWS)
+        progressed = (
+            _RUN_SAVED > before_saved
+            or _RUN_REJECTED > before_rejected
+            or after_n < before_n
+        )
+        return bool(_PENDING_LEAD_ROWS) and progressed
+
+
+def _flush_pending_lead_rows_sync() -> None:
+    while _flush_one_pending_pass():
+        pass
+
+
+async def _flush_pending_lead_rows_async() -> None:
+    """Upsert off the event loop. The asyncio lock is dropped between capped passes."""
+    while True:
+        async with _flush_async_lock():
+            more = await asyncio.to_thread(_flush_one_pending_pass)
+        if not more:
+            return
+        await asyncio.sleep(0)
+
+
+def _queue_lead_row_sync(row: dict[str, str]) -> None:
+    with _FLUSH_THREAD_LOCK:
+        _PENDING_LEAD_ROWS.append(row)
+        _append_sidecar(row)
+        should_flush = len(_PENDING_LEAD_ROWS) >= LEAD_SAVE_BATCH
+    if should_flush:
+        _flush_pending_lead_rows_sync()
+
+
+async def _queue_lead_row_async(row: dict[str, str]) -> None:
+    async with _flush_async_lock():
+        def _append() -> bool:
+            with _FLUSH_THREAD_LOCK:
+                _PENDING_LEAD_ROWS.append(row)
+                _append_sidecar(row)
+                return len(_PENDING_LEAD_ROWS) >= LEAD_SAVE_BATCH
+
+        should_flush = await asyncio.to_thread(_append)
+        if should_flush:
+            await asyncio.to_thread(_flush_one_pending_pass)
+
+
+def _load_retriable_rejected_rows() -> list[dict[str, Any]]:
+    """Rows rejected for a data error. Local validation rejects stay on disk."""
+    path = _rejected_sidecar_path()
+    if not os.path.isfile(path):
+        return []
+    rows: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    with open(path, encoding="utf-8") as handle:
+        for line in handle:
+            text = line.strip()
+            if not text:
+                continue
+            try:
+                item = json.loads(text)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(item, dict):
+                continue
+            error = str(item.get("error") or "").strip()
+            if not _RETRIABLE_REJECT_RE.match(error):
+                continue
+            email = _row_email(item)
+            if email and email in seen:
+                continue
+            if email:
+                seen.add(email)
+            item.pop("error", None)
+            rows.append(item)
+    return rows
+
+
+async def _retry_unpersisted_leads() -> None:
+    """Replay leads whose Supabase save failed, including retriable rejects."""
+    if not _PENDING_LEAD_ROWS:
+        _PENDING_LEAD_ROWS.extend(_load_unpersisted_leads())
+    already = {_row_email(row) for row in _PENDING_LEAD_ROWS}
+    already.discard("")
+    for row in _load_retriable_rejected_rows():
+        email = _row_email(row)
+        if email and email in already:
+            continue
+        _PENDING_LEAD_ROWS.append(row)
+        if email:
+            already.add(email)
+    await _flush_pending_lead_rows_async()
+
+
+def _append_lead_row(row: dict[str, str]) -> None:
+    """Queue one lead. The CSV row is written when the Supabase batch succeeds."""
+    _queue_lead_row_sync(row)
 
 
 def _append_raw_business(business: dict[str, Any]) -> None:
@@ -857,6 +1783,10 @@ def _process_business(
         "Subtypes": fields["Subtypes"],
         "Siret": siret,
         "Siren": siren,
+        "Phone": str(b.get("phone") or "").strip(),
+        "FirstName": str(b.get("first_name") or "").strip(),
+        "LastName": str(b.get("last_name") or "").strip(),
+        "PlaceId": str(b.get("place_id") or b.get("google_id") or "").strip(),
     }
     # Ephemeral: keep reviews for the ingester (not written to CSV columns)
     reviews = b.get("reviews_data")
@@ -1151,6 +2081,10 @@ async def clear_local_leads(
         os.remove(paths.raw_jsonl)
     if os.path.isfile(paths.enrich_audit):
         os.remove(paths.enrich_audit)
+    sidecar = os.path.join(os.path.dirname(paths.csv), "pending_supabase.jsonl")
+    if os.path.isfile(sidecar):
+        os.remove(sidecar)
+    _reset_lead_save_buffer()
     clear_scrape_state(paths.scrape_state)
 
     return {
@@ -1215,6 +2149,7 @@ async def _process_batch_results(
     batches_total: int,
     last_completed: int,
     on_progress_persist: Callable[[int, int, int], None] | None = None,
+    lead_tally: list[int] | None = None,
 ) -> tuple[int, int, int, int, bool]:
     log_cb("Applying scrape gates (email, website, dedup)...")
     raw_places = 0
@@ -1226,6 +2161,10 @@ async def _process_batch_results(
     taxonomy_hard_excluded = 0
     started = time.time()
     target_reached = False
+    # Shared with every in-flight batch. A local int would let each batch
+    # save a full target before the others observe it.
+    if lead_tally is None:
+        lead_tally = [int(leads_saved)]
 
     for query_result in results:
         b_list = query_result if isinstance(query_result, list) else [query_result]
@@ -1255,11 +2194,26 @@ async def _process_batch_results(
             if not row:
                 continue
 
+            email_key = row["Email"]
+            if email_key in seen_em:
+                continue
+            # Claim the slot before any await so concurrent batches cannot
+            # each save a full --target.
+            if _is_target_reached(
+                target=target,
+                target_mode=target_mode,
+                leads_saved=lead_tally[0],
+                instantly_pushed=instantly_pushed,
+                config=config,
+            ):
+                target_reached = True
+                break
+            lead_tally[0] += 1
+            leads_saved = lead_tally[0]
             seen_domain.add(_company_dedup_key(row["Website"], row["Email"]))
-            seen_em.add(row["Email"])
-            _append_lead_row(row)
+            seen_em.add(email_key)
+            await _queue_lead_row_async(row)
             pending_scraped.append(row)
-            leads_saved += 1
             metric_cb(leads_saved, leads_enriched_valid, instantly_pushed)
 
             (
@@ -1291,14 +2245,14 @@ async def _process_batch_results(
             if _is_target_reached(
                 target=target,
                 target_mode=target_mode,
-                leads_saved=leads_saved,
+                leads_saved=lead_tally[0],
                 instantly_pushed=instantly_pushed,
                 config=config,
             ):
                 target_reached = True
                 break
             if on_progress_persist:
-                on_progress_persist(leads_saved, leads_enriched_valid, instantly_pushed)
+                on_progress_persist(lead_tally[0], leads_enriched_valid, instantly_pushed)
         if target_reached:
             break
 
@@ -1316,7 +2270,7 @@ async def _process_batch_results(
             "taxonomy_mismatches": taxonomy_mismatches,
             "taxonomy_hard_excluded": taxonomy_hard_excluded,
             "taxonomy_trash_rate_pct": taxonomy_rate,
-            "leads_saved": leads_saved,
+            "leads_saved": lead_tally[0],
             "leads_enriched_valid": leads_enriched_valid,
             "leads_enriched_rejected": leads_enriched_rejected,
             "instantly_pushed": instantly_pushed,
@@ -1349,7 +2303,7 @@ async def _process_batch_results(
             f"({duplicate_rejects}/{accepted + rejected} = {rate:.0f}%)."
         )
     return (
-        leads_saved,
+        lead_tally[0],
         leads_enriched_valid,
         leads_enriched_rejected,
         instantly_pushed,
@@ -1385,19 +2339,100 @@ async def _run_planner_scrape(
     instantly_pushed: int,
     preset: str = "",
     out_dir: str = "",
-) -> tuple[int, int, int, int, bool]:
-    """Drive Outscraper via SDK wait + query planner until target or exhaustion."""
+) -> tuple[int, int, int, int, bool, bool]:
+    """Drive Outscraper until the lead target, the spend cap, or exhaustion.
+
+    The last bool is budget_exhausted. Places are reserved in memory when a
+    batch is issued and charged on the scrape state immediately before the
+    paid call. A stop or cancel before that call refunds the reservation and
+    does not start a new request.
+    """
+    prior = scrape_spend_snapshot(run_state)
+    spend = scrape_spend_plan(
+        config,
+        target=target,
+        already_saved=leads_saved,
+        already_spent_usd=float(prior["already_spent_usd"]),
+        already_places=int(prior["already_places"]),
+        spent_today_usd=float(prior["spent_today_usd"]),
+    )
+    if spend["refused"]:
+        _refuse_scrape_over_budget(spend)
+    log_cb(format_scrape_spend(spend))
+    if spend["budget_exhausted"] or (
+        int(spend["places"]) < 1 and int(spend["target_remaining"]) > 0
+    ):
+        log_cb("Spend budget exhausted — stopping before any Outscraper request.")
+        return (
+            leads_saved,
+            leads_enriched_valid,
+            leads_enriched_rejected,
+            instantly_pushed,
+            False,
+            True,
+        )
+    places_cap = int(spend["places"])
+    usd_per_place = float(spend["usd_per_place"])
+    places_reserved = 0
+    lead_tally = [int(leads_saved)]
+    issued_limits: dict[int, int] = {}
+    charged_batches: set[int] = set()
     out_filters = outscraper_filters(config)
     out_language = outscraper_request_language(config)
     out_enrichment = outscraper_enrichment(config)
     batches_run = 0
     target_reached = False
+    stopping = False
     semaphore = asyncio.Semaphore(settings.concurrency)
+
+    def _refund_reservation(batch: query_planner.SearchBatch) -> None:
+        nonlocal places_reserved
+        requested = len(batch.queries) * int(issued_limits.get(id(batch), 0))
+        places_reserved = max(0, places_reserved - requested)
 
     async def _run_one_batch(batch: query_planner.SearchBatch) -> None:
         nonlocal leads_saved, leads_enriched_valid, leads_enriched_rejected
         nonlocal instantly_pushed, batches_run, target_reached
+        recorded = False
+        try:
+            await _execute_reserved_batch(batch)
+            recorded = True
+        except asyncio.CancelledError:
+            if not recorded:
+                planner.release_batch(batch)
+                if id(batch) not in charged_batches:
+                    _refund_reservation(batch)
+            raise
+        except LeadPersistenceError:
+            if not recorded:
+                planner.release_batch(batch)
+            raise
+        except Exception:
+            if not recorded:
+                planner.abandon_batch(batch)
+            raise
+
+    async def _execute_reserved_batch(batch: query_planner.SearchBatch) -> None:
+        nonlocal leads_saved, leads_enriched_valid, leads_enriched_rejected
+        nonlocal instantly_pushed, batches_run, target_reached, stopping
         async with semaphore:
+            if stopping or target_reached or _is_target_reached(
+                target=target,
+                target_mode=target_mode,
+                leads_saved=lead_tally[0],
+                instantly_pushed=instantly_pushed,
+                config=config,
+            ):
+                planner.release_batch(batch)
+                _refund_reservation(batch)
+                return
+            requested_limit = issued_limits.get(id(batch), settings.limit_per_query)
+            record_scrape_spend(
+                run_state,
+                len(batch.queries) * requested_limit,
+                usd_per_place,
+            )
+            charged_batches.add(id(batch))
             skip_label = f", skipPlaces={batch.skip_places}" if batch.skip_places else ""
             log_cb(
                 f"Outscraper SDK batch {batch.batch_index + 1} "
@@ -1405,7 +2440,7 @@ async def _run_planner_scrape(
             )
             results = await client.google_maps_search_batch(
                 batch.queries,
-                settings.limit_per_query,
+                requested_limit,
                 skip_places=batch.skip_places,
                 filters=out_filters or None,
                 language=out_language,
@@ -1416,13 +2451,9 @@ async def _run_planner_scrape(
             )
             if not results and client.last_error:
                 log_cb(f"Outscraper batch failed: {client.last_error}")
+                planner.abandon_batch(batch)
+                return
             per_query = count_places_per_query(results, len(batch.queries))
-            planner.record_batch_result(
-                batch,
-                raw_places_per_query=per_query,
-                limit_per_query=settings.limit_per_query,
-            )
-            batches_run += 1
 
             def _persist_now(ls: int, lev: int, ip: int) -> None:
                 if run_state is None:
@@ -1469,7 +2500,15 @@ async def _run_planner_scrape(
                 batches_total=max(planner.total_slots(), 1),
                 last_completed=batch.batch_index,
                 on_progress_persist=_persist_now,
+                lead_tally=lead_tally,
             )
+            await _flush_pending_lead_rows_async()
+            planner.record_batch_result(
+                batch,
+                raw_places_per_query=per_query,
+                limit_per_query=requested_limit,
+            )
+            batches_run += 1
             log_cb(
                 f"Batch {batch.batch_index + 1} processed. "
                 f"Scraped: {leads_saved} | Enriched: {leads_enriched_valid} | "
@@ -1490,50 +2529,108 @@ async def _run_planner_scrape(
                 )
             if batch_target_reached:
                 target_reached = True
+                stopping = True
             if target_mode in ("instantly_pushed", "instantly_pushed_run"):
                 progress_cb(min(instantly_pushed / target, 1.0) if target else 0.0)
             else:
                 progress_cb(min(leads_saved / target, 1.0) if target else 0.0)
 
     inflight_tasks: set[asyncio.Task] = set()
-    while (
-        not target_reached
-        and not planner.exhausted()
-        and not _is_target_reached(
-            target=target,
-            target_mode=target_mode,
-            leads_saved=leads_saved,
-            instantly_pushed=instantly_pushed,
-            config=config,
-        )
-    ):
+
+    def _cancel_inflight() -> list[asyncio.Task]:
+        nonlocal stopping
+        stopping = True
+        pending_tasks = list(inflight_tasks)
+        for task in pending_tasks:
+            task.cancel()
+        return pending_tasks
+
+    try:
         while (
-            len(inflight_tasks) < settings.concurrency
-            and not planner.exhausted()
+            not stopping
             and not target_reached
+            and not planner.exhausted()
+            and places_reserved < places_cap
+            and not _is_target_reached(
+                target=target,
+                target_mode=target_mode,
+                leads_saved=lead_tally[0],
+                instantly_pushed=instantly_pushed,
+                config=config,
+            )
         ):
-            batch = planner.next_batch(settings.batch_size)
-            if batch is None:
+            while (
+                not stopping
+                and len(inflight_tasks) < settings.concurrency
+                and not planner.exhausted()
+                and not target_reached
+                and places_reserved < places_cap
+            ):
+                remaining_places = places_cap - places_reserved
+                per_query = min(settings.limit_per_query, remaining_places)
+                if per_query < 1:
+                    break
+                max_queries = min(settings.batch_size, remaining_places // per_query)
+                if max_queries < 1:
+                    break
+                batch = planner.next_batch(max_queries)
+                if batch is None:
+                    break
+                requested = len(batch.queries) * per_query
+                if requested > remaining_places:
+                    planner.release_batch(batch)
+                    break
+                places_reserved += requested
+                issued_limits[id(batch)] = per_query
+                task = asyncio.create_task(_run_one_batch(batch))
+                inflight_tasks.add(task)
+                task.add_done_callback(inflight_tasks.discard)
+
+            if not inflight_tasks:
                 break
-            task = asyncio.create_task(_run_one_batch(batch))
-            inflight_tasks.add(task)
-            task.add_done_callback(inflight_tasks.discard)
 
-        if not inflight_tasks:
-            break
+            done, pending = await asyncio.wait(
+                inflight_tasks,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            persistence_error: LeadPersistenceError | None = None
+            for finished in done:
+                try:
+                    await finished
+                except LeadPersistenceError as exc:
+                    persistence_error = exc
+                    break
+                except Exception as exc:
+                    log_cb(f"Batch processing error: {exc}")
+            if persistence_error is not None:
+                pending_tasks = _cancel_inflight()
+                if pending_tasks:
+                    await asyncio.gather(*pending_tasks, return_exceptions=True)
+                log_cb(f"Lead save failed — stopping the scrape: {persistence_error}")
+                raise persistence_error
+            if target_reached or _is_target_reached(
+                target=target,
+                target_mode=target_mode,
+                leads_saved=lead_tally[0],
+                instantly_pushed=instantly_pushed,
+                config=config,
+            ):
+                stopping = True
 
-        done, pending = await asyncio.wait(
-            inflight_tasks,
-            return_when=asyncio.FIRST_COMPLETED,
-        )
-        for finished in done:
-            try:
-                await finished
-            except Exception as exc:
-                log_cb(f"Batch processing error: {exc}")
-
-    if inflight_tasks:
-        await asyncio.gather(*inflight_tasks, return_exceptions=True)
+        if inflight_tasks:
+            stopping = True
+            await asyncio.gather(*inflight_tasks, return_exceptions=True)
+    except BaseException as exc:
+        pending_tasks = _cancel_inflight()
+        current = asyncio.current_task()
+        if isinstance(exc, asyncio.CancelledError) and current is not None:
+            uncancel = getattr(current, "uncancel", None)
+            if uncancel is not None:
+                while uncancel():
+                    pass
+        if pending_tasks:
+            await asyncio.gather(*pending_tasks, return_exceptions=True)
+        raise
 
     exhausted = planner.exhausted()
     return (
@@ -1542,6 +2639,7 @@ async def _run_planner_scrape(
         leads_enriched_rejected,
         instantly_pushed,
         exhausted,
+        False,
     )
 
 
@@ -1557,6 +2655,10 @@ async def run_scraper_pipeline(
     reset: bool = False,
     preset: str = "biggy_agency",
 ) -> dict[str, Any]:
+    if not dry_run:
+        from shared.central_leads import probe_leads_table
+
+        probe_leads_table()
     from scrape_state import (
         apply_pipeline_config_migration,
         build_config_fingerprint,
@@ -1615,6 +2717,7 @@ async def run_scraper_pipeline(
         "geo_reload_exhausted": False,
         "resumed": resume,
         "preset": preset,
+        "budget_exhausted": False,
     }
 
     pass0_queries = build_queries(config, 0)
@@ -1624,8 +2727,8 @@ async def run_scraper_pipeline(
         f"(batch {settings.batch_size}, concurrency {settings.concurrency})"
     )
     log_cb(
-        f"Outscraper SDK: limit/query={settings.limit_per_query}, "
-        f"wait_async (no manual poll loop)"
+        f"Outscraper: limit/query={settings.limit_per_query}, "
+        f"one POST per batch then poll by request id"
     )
     log_cb(f"Target: {target} ({mode}) — output: {paths.out_dir}")
     enrich_cfg = _enrich_settings(config)
@@ -1643,7 +2746,12 @@ async def run_scraper_pipeline(
             f"concurrency {enrich_cfg['concurrency']}, timeout {enrich_cfg['timeout_ms']}ms"
         )
     else:
-        log_cb("Website enrich disabled — scraped leads go directly to Instantly push")
+        if _uncleaned_push_allowed():
+            log_cb("Website enrich disabled — scraped leads go directly to Instantly push")
+        else:
+            log_cb(
+                "Website enrich disabled — scraped leads are saved as uncleaned Supabase rows"
+            )
     if bool(config.get("PAPPERS_ENABLED", False)):
         pappers_batch = _pappers_batch_settings(config)
         max_effectif = int(config.get("PAPPERS_MAX_EMPLOYEES") or 0)
@@ -1687,27 +2795,36 @@ async def run_scraper_pipeline(
         )
 
     if dry_run:
+        log_cb(format_scrape_spend(scrape_spend_plan(config, target=target, already_saved=0)))
+        push_to_instantly = _apply_uncleaned_push_policy(push_to_instantly, log_cb)
         if not config.get("OUTSCRAPER_API_KEY"):
             log_cb("WARNING: OUTSCRAPER_API_KEY is missing")
         else:
             log_cb("OUTSCRAPER_API_KEY present (dry-run — no API calls)")
-        if is_instantly_push_mode(mode):
-            if push_to_instantly and config.get("INSTANTLY_API_KEY") and config.get("INSTANTLY_LIST_ID"):
+        if is_instantly_push_mode(mode) and push_to_instantly:
+            if config.get("INSTANTLY_API_KEY") and config.get("INSTANTLY_LIST_ID"):
                 log_cb(f"Instantly push enabled — target metric is {mode}")
             else:
                 log_cb(f"WARNING: TARGET_MODE={mode} requires Instantly keys + push")
+        elif is_instantly_push_mode(mode):
+            log_cb(
+                f"Target mode {mode} counts saved leads while uncleaned Instantly push is off."
+            )
         log_cb("Dry-run complete — zero Outscraper requests made.")
         summary["queries_total"] = slot_estimate
+        if slot_estimate and settings.batch_size:
+            summary["batches_total"] = (slot_estimate + settings.batch_size - 1) // settings.batch_size
         progress_cb(1.0)
         return summary
 
     if not config.get("OUTSCRAPER_API_KEY"):
         raise SystemExit("OUTSCRAPER_API_KEY is required for live scrape")
 
-    if is_instantly_push_mode(mode):
+    if is_instantly_push_mode(mode) and _uncleaned_push_allowed():
         if not push_to_instantly:
             push_to_instantly = True
             log_cb(f"Auto-enabling Instantly push (target metric = {mode}).")
+    push_to_instantly = _apply_uncleaned_push_policy(push_to_instantly, log_cb)
 
     if push_to_instantly and not dry_run:
         from bootstrap.validators import require_instantly_list_for_scrape_push
@@ -1729,7 +2846,12 @@ async def run_scraper_pipeline(
             log_cb(
                 "Config fingerprint changed — migrating checkpoint and continuing resume."
             )
-        if existing_state and existing_state.get("push_to_instantly") and not push_to_instantly:
+        if (
+            existing_state
+            and existing_state.get("push_to_instantly")
+            and not push_to_instantly
+            and _uncleaned_push_allowed()
+        ):
             push_to_instantly = True
             log_cb("Resuming with auto-push (enabled in saved run).")
     elif not reset:
@@ -1744,6 +2866,8 @@ async def run_scraper_pipeline(
             )
             raise SystemExit(hint)
 
+    _reset_lead_save_buffer()
+    await _retry_unpersisted_leads()
     seen_em, seen_domain = _load_seen_from_csv()
     leads_saved = len(seen_em)
     if leads_saved:
@@ -1854,6 +2978,7 @@ async def run_scraper_pipeline(
             query_pass=initial_query_pass(config),
             last_completed_batch_index=-1,
         )
+        _carry_recorded_spend(run_state, existing_state)
         save_scrape_state(run_state, path=_active.scrape_state)
         log_cb(f"Resuming from CSV without checkpoint ({leads_saved} leads in CSV).")
     else:
@@ -1868,6 +2993,7 @@ async def run_scraper_pipeline(
             query_pass=initial_query_pass(config),
             last_completed_batch_index=-1,
         )
+        _carry_recorded_spend(run_state, existing_state)
         save_scrape_state(run_state, path=_active.scrape_state)
         start_pass = initial_query_pass(config)
         if start_pass > 0:
@@ -1939,6 +3065,7 @@ async def run_scraper_pipeline(
             leads_enriched_rejected,
             instantly_pushed,
             planner_exhausted,
+            budget_exhausted,
         ) = await _run_planner_scrape(
             client=out_client,
             planner=planner,
@@ -1966,6 +3093,7 @@ async def run_scraper_pipeline(
             out_dir=paths.out_dir,
         )
         summary["geo_reload_exhausted"] = planner_exhausted
+        summary["budget_exhausted"] = budget_exhausted
         if run_state is not None and planner_exhausted:
             run_state["geo_reload_exhausted"] = True
             save_scrape_state(run_state, path=_active.scrape_state)
@@ -1974,6 +3102,8 @@ async def run_scraper_pipeline(
 
     finally:
         await out_client.aclose()
+
+    await _flush_pending_lead_rows_async()
 
     if (enrich_enabled or bool(config.get("INGESTER_ENABLED", False))) and pending_scraped:
         label = "ingester" if config.get("INGESTER_ENABLED") else "enrich"
@@ -2395,6 +3525,41 @@ def _website_from_recovery_result(item: dict[str, Any], fallback: str) -> str:
     return fallback
 
 
+def _email_recovery_allowance(
+    state_path: str,
+    *,
+    max_cost_usd: float,
+    domain_count: int,
+    limit: int,
+) -> tuple[int, float, float]:
+    """Domains still affordable, this call's worst case, and spend so far."""
+    from scrape_state import load_scrape_state
+
+    state = load_scrape_state(state_path) or {}
+    spent = float(state.get("email_recovery_spend_usd") or 0)
+    usd_per_domain = CONTACTS_USD_PER_1000 / 1000.0
+    remaining = max(float(max_cost_usd) - spent, 0.0)
+    affordable = _places_for_budget(remaining, usd_per_domain)
+    if limit > 0:
+        affordable = min(affordable, int(limit))
+    affordable = min(affordable, max(int(domain_count), 0))
+    return affordable, round(affordable * usd_per_domain, 4), spent
+
+
+def _charge_email_recovery(state_path: str, domains: int) -> None:
+    from scrape_state import load_scrape_state, save_scrape_state
+
+    if domains <= 0:
+        return
+    state = load_scrape_state(state_path) or {}
+    cost = round(int(domains) * CONTACTS_USD_PER_1000 / 1000.0, 4)
+    state["email_recovery_spend_usd"] = round(
+        float(state.get("email_recovery_spend_usd") or 0) + cost,
+        4,
+    )
+    save_scrape_state(state, state_path)
+
+
 async def run_email_recovery(
     config: dict,
     *,
@@ -2403,8 +3568,14 @@ async def run_email_recovery(
     batch_size: int = 25,
     push_to_instantly: bool = True,
     dry_run: bool = False,
+    max_cost_usd: float = 10.0,
+    limit: int = 0,
 ) -> dict[str, Any]:
-    """Recover emails for queued domains via Outscraper emails-and-contacts."""
+    """Recover emails for queued domains via Outscraper emails-and-contacts.
+
+    ``max_cost_usd`` is cumulative on this preset's scrape state. Domains past
+    the cap stay in the queue.
+    """
     paths = activate_output_paths(preset or "biggy_agency")
     queued = _load_email_recovery_queue(paths.email_recovery)
     unique = _dedupe_recovery_by_website(queued)
@@ -2417,6 +3588,9 @@ async def run_email_recovery(
         "skipped_duplicate": 0,
         "failed": 0,
         "dry_run": dry_run,
+        "domains_sent": 0,
+        "budget_exhausted": False,
+        "worst_case_usd": 0.0,
     }
     if not unique:
         log_cb("Email recovery — queue empty.")
@@ -2426,6 +3600,8 @@ async def run_email_recovery(
         log_cb("Email recovery disabled (OUTSCRAPER_EMAIL_RECOVERY_ENABLED=false).")
         return summary
 
+    push_to_instantly = _apply_uncleaned_push_policy(push_to_instantly, log_cb)
+
     api_key = str(config.get("OUTSCRAPER_API_KEY") or "").strip()
     if not api_key:
         raise SystemExit("OUTSCRAPER_API_KEY required for email recovery")
@@ -2434,24 +3610,56 @@ async def run_email_recovery(
 
     client = SdkOutscraperClient(api_key)
     activate_output_paths(preset or "biggy_agency")
+    _reset_lead_save_buffer()
+    if not dry_run:
+        from shared.central_leads import probe_leads_table
+
+        probe_leads_table()
+        await _retry_unpersisted_leads()
     seen_em, seen_domain = _load_seen_from_csv()
 
     pending_instantly: list[dict[str, str]] = []
     accepted_rows: list[dict[str, str]] = []
     chunk = max(int(batch_size), 1)
 
+    from shared.phone_enrichment import format_usd
+
+    cap = float(max_cost_usd)
+    affordable, worst_case, spent = _email_recovery_allowance(
+        paths.scrape_state,
+        max_cost_usd=cap,
+        domain_count=len(unique),
+        limit=limit,
+    )
+    summary["worst_case_usd"] = worst_case
+    log_cb(
+        f"Email recovery spend cap — at most {affordable} domain(s), "
+        f"worst case ${format_usd(worst_case)} "
+        f"(${format_usd(CONTACTS_USD_PER_1000)}/1,000 emails-and-contacts). "
+        f"Cap ${format_usd(cap)}. Already spent ${format_usd(spent)}."
+    )
     log_cb(
         f"Email recovery — {len(unique)} unique domain(s) "
         f"(from {len(queued)} queued row(s)), batch_size={chunk}"
     )
+    if affordable < 1:
+        summary["budget_exhausted"] = True
+        log_cb("Email recovery budget exhausted — no Outscraper request sent.")
+        return summary
 
-    for offset in range(0, len(unique), chunk):
-        batch = unique[offset : offset + chunk]
+    work = unique[:affordable]
+    processed_sites: set[str] = set()
+
+    for offset in range(0, len(work), chunk):
+        batch = work[offset : offset + chunk]
         domains = [str(row.get("website") or "") for row in batch]
         log_cb(f"Recovering emails batch {offset // chunk + 1} — {len(domains)} domain(s)")
         if dry_run:
             continue
+        _charge_email_recovery(paths.scrape_state, len(domains))
+        summary["domains_sent"] += len(domains)
         results = await client.emails_and_contacts(domains)
+        processed_sites.update(_normalize_web(domain) for domain in domains if domain)
         by_domain: dict[str, dict[str, Any]] = {}
         for item in results:
             if not isinstance(item, dict):
@@ -2498,7 +3706,7 @@ async def run_email_recovery(
                 summary["accepted"] += 1
                 seen_em.add(row["Email"])
                 seen_domain.add(_company_dedup_key(row["Website"], row["Email"]))
-                _append_lead_row(row)
+                await _queue_lead_row_async(row)
                 accepted_rows.append(row)
                 if push_to_instantly:
                     pending_instantly.append(row)
@@ -2527,11 +3735,27 @@ async def run_email_recovery(
         summary["skipped_duplicate"] += int(flush_stats.get("skipped_duplicate", 0) or 0)
         summary["failed"] += int(flush_stats.get("failed", 0) or 0)
 
-    if not dry_run and unique:
-        # Clear sidecar after a successful recovery pass
+    if not dry_run:
+        await _flush_pending_lead_rows_async()
+
+    if not dry_run and processed_sites:
+        kept: list[dict[str, Any]] = []
+        seen_kept: set[str] = set()
+        for row in queued:
+            website = _normalize_web(str(row.get("website") or ""))
+            if not website or website in processed_sites or website in seen_kept:
+                continue
+            seen_kept.add(website)
+            kept.append(row)
         with open(paths.email_recovery, "w", encoding="utf-8") as handle:
-            handle.write("")
-        log_cb(f"Email recovery queue cleared — {paths.email_recovery}")
+            for row in kept:
+                handle.write(json.dumps(row, ensure_ascii=False) + "\n")
+        if kept:
+            log_cb(
+                f"Email recovery queue kept {len(kept)} unsent domain(s) — {paths.email_recovery}"
+            )
+        else:
+            log_cb(f"Email recovery queue cleared — {paths.email_recovery}")
 
     log_cb(
         f"Email recovery done — recovered={summary['recovered']}, "

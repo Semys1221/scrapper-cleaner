@@ -6,7 +6,16 @@ import asyncio
 import time
 from typing import Any, Callable, Protocol
 
+import requests
 from outscraper import OutscraperClient as _SdkClient
+
+# One host. The SDK walks extra hosts on connection errors and would POST again.
+_MAPS_API_ROOT = "https://api.app.outscraper.com"
+_POLL_INTERVAL_S = 5.0
+
+
+class OutscraperRequestError(RuntimeError):
+    """Outscraper call failed. Callers must not treat this as an empty result."""
 
 
 class _PollSettings(Protocol):
@@ -20,13 +29,6 @@ class _PollableJob(Protocol):
     task_id: str
     submitted_at: float
     last_polled_at: float
-
-
-def _parse_task_id(data: dict[str, Any]) -> str | None:
-    task_id = data.get("id")
-    if task_id and data.get("status") in ("Pending", "Success"):
-        return str(task_id)
-    return None
 
 
 def _normalize_archive_data(raw_data: Any) -> list:
@@ -83,18 +85,71 @@ def count_places_per_query(results: list, query_count: int) -> list[int]:
     return [flat] + [0] * (query_count - 1)
 
 
-_SUBMIT_MAX_RETRIES = 4
-_SUBMIT_BACKOFF_S = (1.0, 2.0, 4.0, 8.0)
-
-
 class OutscraperClient:
-    """Async wrapper for Outscraper Google Maps Search via the official SDK."""
+    """Async wrapper for Outscraper Google Maps Search.
+
+    A maps search is one paid POST. Timeouts and HTTP errors do not submit
+    again: the request id is polled until Success or the deadline. A timed-out
+    POST is still counted, because Outscraper may keep billing it server-side.
+    """
 
     def __init__(self, api_key: str) -> None:
         self.api_key = api_key
         self._sdk = _SdkClient(api_key=api_key)
         self.qps_delay = 0.05
+        self.poll_interval_s = _POLL_INTERVAL_S
         self.last_error: str = ""
+        self.paid_submits = 0
+        self.places_submitted = 0
+
+    def _api_headers(self) -> dict[str, str]:
+        return {"X-API-KEY": self.api_key, "client": "Python SDK"}
+
+    def _submit_maps_once(self, payload: dict[str, Any]) -> str:
+        """POST /google-maps-search exactly once and return the request id.
+
+        ``paid_submits`` / ``places_submitted`` increment before the socket
+        call so a timeout still counts as spend.
+        """
+        queries = payload.get("query") or []
+        if isinstance(queries, str):
+            queries = [queries]
+        limit = int(payload.get("limit") or 0)
+        self.paid_submits += 1
+        self.places_submitted += max(len(queries), 0) * max(limit, 0)
+        body = dict(payload)
+        body["async"] = True
+        response = requests.post(
+            f"{_MAPS_API_ROOT}/google-maps-search",
+            headers=self._api_headers(),
+            json=body,
+            timeout=30,
+        )
+        if not (199 < response.status_code < 300):
+            raise RuntimeError(f"Response status code: {response.status_code}")
+        data = response.json()
+        if not isinstance(data, dict):
+            raise RuntimeError("unexpected submit payload")
+        if data.get("error"):
+            raise RuntimeError(str(data.get("errorMessage") or data.get("error")))
+        task_id = data.get("id")
+        if not task_id:
+            raise RuntimeError("missing task id")
+        return str(task_id)
+
+    def _get_request(self, request_id: str) -> dict[str, Any]:
+        """GET /requests/{id}. Callers may retry this; it does not bill again."""
+        response = requests.get(
+            f"{_MAPS_API_ROOT}/requests/{request_id}",
+            headers=self._api_headers(),
+            timeout=30,
+        )
+        if not (199 < response.status_code < 300):
+            raise RuntimeError(f"Response status code: {response.status_code}")
+        data = response.json()
+        if not isinstance(data, dict):
+            raise RuntimeError("unexpected archive payload")
+        return data
 
     async def aclose(self) -> None:
         return None
@@ -113,7 +168,7 @@ class OutscraperClient:
         out_dir: str = "",
         timeout_s: float = 600.0,
     ) -> list:
-        """Run Google Maps search via SDK (blocking wait) with optional worker heartbeat."""
+        """POST one Google Maps search, then poll its request id. Never re-POST."""
         cleaned = [str(q).strip() for q in queries if str(q).strip()]
         if not cleaned:
             return []
@@ -135,18 +190,7 @@ class OutscraperClient:
             payload["skipPlaces"] = int(skip_places)
         if filters:
             payload["filters"] = filters
-
-        async def _call_sdk() -> Any:
-            def _submit() -> Any:
-                return self._sdk._request(
-                    "POST",
-                    "/google-maps-search",
-                    wait_async=True,
-                    async_request=False,
-                    json=payload,
-                )
-
-            return await asyncio.to_thread(_submit)
+        payload["async"] = True
 
         heartbeat_task: asyncio.Task | None = None
         if out_dir and preset:
@@ -159,27 +203,42 @@ class OutscraperClient:
 
             heartbeat_task = asyncio.create_task(_heartbeat_loop())
 
-        sdk_timeout = max(float(timeout_s), 60.0)
-
+        deadline = time.monotonic() + max(float(timeout_s), 0.0)
         try:
-            for attempt in range(_SUBMIT_MAX_RETRIES):
+            try:
+                request_id = await asyncio.to_thread(self._submit_maps_once, payload)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                self.last_error = str(exc)
+                return []
+
+            while True:
                 try:
-                    result = await asyncio.wait_for(_call_sdk(), timeout=sdk_timeout)
-                    self.last_error = ""
-                    normalized = normalize_maps_search_payload(result)
-                    return normalized
-                except asyncio.TimeoutError:
-                    self.last_error = f"Outscraper SDK timed out after {sdk_timeout:.0f}s"
-                    if attempt < _SUBMIT_MAX_RETRIES - 1:
-                        await asyncio.sleep(_SUBMIT_BACKOFF_S[attempt])
-                        continue
-                    return []
+                    archive = await asyncio.to_thread(self._get_request, request_id)
+                except asyncio.CancelledError:
+                    raise
                 except Exception as exc:
-                    self.last_error = str(exc)
-                    if attempt < _SUBMIT_MAX_RETRIES - 1:
-                        await asyncio.sleep(_SUBMIT_BACKOFF_S[attempt])
-                        continue
+                    if time.monotonic() >= deadline:
+                        self.last_error = f"Outscraper poll failed: {exc}"
+                        return []
+                    await asyncio.sleep(self.poll_interval_s)
+                    continue
+                status = str(archive.get("status") or "")
+                if status == "Success":
+                    self.last_error = ""
+                    return normalize_maps_search_payload(archive.get("data"))
+                if status and status != "Pending":
+                    self.last_error = str(
+                        archive.get("errorMessage")
+                        or archive.get("error")
+                        or status
+                    )
                     return []
+                if time.monotonic() >= deadline:
+                    self.last_error = f"Outscraper poll timed out after {float(timeout_s):.0f}s"
+                    return []
+                await asyncio.sleep(self.poll_interval_s)
         finally:
             if heartbeat_task is not None:
                 heartbeat_task.cancel()
@@ -220,52 +279,18 @@ class OutscraperClient:
             payload["skipPlaces"] = skip_places
         if filters:
             payload["filters"] = filters
+        payload["async"] = True
 
-        def _submit() -> dict[str, Any] | list[Any]:
-            return self._sdk._request(
-                "POST",
-                "/google-maps-search",
-                wait_async=True,
-                async_request=True,
-                json=payload,
-            )
-
-        for attempt in range(_SUBMIT_MAX_RETRIES):
-            try:
-                result = await asyncio.to_thread(_submit)
-            except Exception as exc:
-                self.last_error = str(exc)
-                if attempt < _SUBMIT_MAX_RETRIES - 1:
-                    await asyncio.sleep(_SUBMIT_BACKOFF_S[attempt])
-                    continue
-                return None
-
-            if not isinstance(result, dict):
-                self.last_error = f"unexpected response type: {type(result).__name__}"
-                if attempt < _SUBMIT_MAX_RETRIES - 1:
-                    await asyncio.sleep(_SUBMIT_BACKOFF_S[attempt])
-                    continue
-                return None
-
-            task_id = _parse_task_id(result)
-            if task_id:
-                self.last_error = ""
-                await asyncio.sleep(self.qps_delay)
-                return task_id
-
-            status = str(result.get("status") or "")
-            error_text = str(result.get("error") or result.get("message") or status)
-            self.last_error = error_text or "missing task id"
-            if attempt < _SUBMIT_MAX_RETRIES - 1 and status.lower() in (
-                "",
-                "pending",
-                "failure",
-                "error",
-            ):
-                await asyncio.sleep(_SUBMIT_BACKOFF_S[attempt])
-                continue
+        try:
+            task_id = await asyncio.to_thread(self._submit_maps_once, payload)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            self.last_error = str(exc)
             return None
-        return None
+        self.last_error = ""
+        await asyncio.sleep(self.qps_delay)
+        return task_id
 
     async def emails_and_contacts(self, domains: list[str]) -> list[dict[str, Any]]:
         """Crawl domains for emails via Outscraper emails-and-contacts endpoint."""
@@ -280,13 +305,46 @@ class OutscraperClient:
             result = await asyncio.to_thread(_call)
         except Exception as exc:
             self.last_error = str(exc)
-            return []
+            raise OutscraperRequestError(str(exc)) from exc
 
         if result is None:
             return []
         if isinstance(result, list):
             return [item for item in result if isinstance(item, dict)]
         if isinstance(result, dict):
+            data = result.get("data")
+            if isinstance(data, list):
+                return [item for item in data if isinstance(item, dict)]
+            return [result]
+        return []
+
+    async def phones_enricher(self, phones: list[str]) -> list[dict[str, Any]]:
+        """Validate numbers via Outscraper GET /phones-enricher (carrier name and type)."""
+        cleaned = [str(phone).strip() for phone in phones if str(phone).strip()]
+        if not cleaned:
+            return []
+
+        def _call() -> Any:
+            return self._sdk.phones_enricher(cleaned)
+
+        try:
+            result = await asyncio.to_thread(_call)
+        except Exception as exc:
+            self.last_error = str(exc)
+            raise OutscraperRequestError(str(exc)) from exc
+
+        if result is None:
+            return []
+        if isinstance(result, list):
+            return [item for item in result if isinstance(item, dict)]
+        if isinstance(result, dict):
+            if result.get("error") is True or str(result.get("status") or "").lower() in {
+                "failure",
+                "error",
+                "failed",
+            }:
+                self.last_error = str(result.get("errorMessage") or result.get("error") or result.get("status"))
+                return [result]
             data = result.get("data")
             if isinstance(data, list):
                 return [item for item in data if isinstance(item, dict)]
