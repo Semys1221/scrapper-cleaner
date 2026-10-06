@@ -11,13 +11,18 @@ def test_custom_variables_patch_for_row_sets_cleaned_valid() -> None:
     row = pd.Series(
         {
             "email": "a@example.com",
-            "custom_variables": {"city": "Paris", "note": "x"},
+            "phone": "+33 6 12 34 56 78",
+            "category": "PLOMBIER",
+            "custom_variables": {"city": "Paris", "siret": "123", "note": "x", "phone": "0102030405"},
         }
     )
     patch = custom_variables_patch_for_row(row)
-    assert patch["cleaned"] == "valid"
-    assert patch["city"] == "Paris"
-    assert patch["note"] == "x"
+    assert patch == {
+        "cleaned": "valid",
+        "status": "cleaned",
+        "category": "PLOMBIER",
+        "phone": "+33612345678",
+    }
 
 
 def test_mark_cleaned_leads_uses_instantly_lead_id(monkeypatch) -> None:

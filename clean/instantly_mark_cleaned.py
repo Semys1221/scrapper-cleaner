@@ -2,36 +2,35 @@
 
 from __future__ import annotations
 
-from typing import Any, Callable
+from typing import Callable
 
 import pandas as pd
 
-from clean_column import CLEANED_KEY, CLEANED_VALUE_VALID, merge_custom_variables
+from clean_column import CLEANED_VALUE_VALID, merge_custom_variables
 from instantly_client import _get_client
 
 
-def _scalar_custom_value(value: Any) -> str | None:
-    if value is None or (isinstance(value, float) and pd.isna(value)):
-        return None
-    if isinstance(value, (dict, list)):
-        return None
-    if isinstance(value, bool):
-        return "true" if value else "false"
-    text = str(value).strip()
-    return text if text else None
-
-
 def custom_variables_patch_for_row(row: pd.Series) -> dict[str, str]:
-    """Build Instantly PATCH custom_variables for one cleaned lead row."""
+    """Build Instantly PATCH custom_variables for one cleaned lead row.
+
+    Only core variables are sent: phone, category, status, cleaned.
+    """
+    from shared.central_leads import core_instantly_custom_variables, normalize_phone
+
     merged = merge_custom_variables(row.get("custom_variables"))
-    merged[CLEANED_KEY] = CLEANED_VALUE_VALID
-    patch: dict[str, str] = {}
-    for key, value in merged.items():
-        scalar = _scalar_custom_value(value)
-        if scalar is not None:
-            patch[str(key)] = scalar
-    patch[CLEANED_KEY] = CLEANED_VALUE_VALID
-    return patch
+    phone = normalize_phone(row.get("phone") if "phone" in row.index else row.get("Phone"))
+    category = ""
+    if "category" in row.index:
+        raw_category = row.get("category")
+        if raw_category is not None and not (isinstance(raw_category, float) and pd.isna(raw_category)):
+            category = str(raw_category).strip()
+    return core_instantly_custom_variables(
+        merged,
+        phone=phone,
+        category=category,
+        status="cleaned",
+        cleaned=CLEANED_VALUE_VALID,
+    )
 
 
 def _read_lead_id(row: pd.Series) -> str | None:

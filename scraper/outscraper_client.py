@@ -293,6 +293,39 @@ class OutscraperClient:
             return [result]
         return []
 
+    async def phones_enricher(self, phones: list[str]) -> list[dict[str, Any]]:
+        """Validate numbers via Outscraper GET /phones-enricher (carrier name and type)."""
+        cleaned = [str(phone).strip() for phone in phones if str(phone).strip()]
+        if not cleaned:
+            return []
+
+        def _call() -> Any:
+            return self._sdk.phones_enricher(cleaned)
+
+        try:
+            result = await asyncio.to_thread(_call)
+        except Exception as exc:
+            self.last_error = str(exc)
+            return []
+
+        if result is None:
+            return []
+        if isinstance(result, list):
+            return [item for item in result if isinstance(item, dict)]
+        if isinstance(result, dict):
+            if result.get("error") is True or str(result.get("status") or "").lower() in {
+                "failure",
+                "error",
+                "failed",
+            }:
+                self.last_error = str(result.get("errorMessage") or result.get("error") or result.get("status"))
+                return [result]
+            data = result.get("data")
+            if isinstance(data, list):
+                return [item for item in data if isinstance(item, dict)]
+            return [result]
+        return []
+
     async def check_task_status(self, task_id: str) -> list | None:
         def _fetch() -> dict[str, Any]:
             return self._sdk.get_request_archive(task_id)

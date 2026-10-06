@@ -61,3 +61,16 @@ ExecStart=/usr/bin/python3 main.py heal --preset avocats --stale-minutes 3
 **Agences immobilières** — same pattern with `--preset agences_immobilieres` and a dedicated `VPS_SCRAPER_SERVICE` / unit name if you run multiple presets.
 
 `heal` reads `VPS_SCRAPER_SERVICE` (default `hercule-scraper`) and restarts that unit when the worker heartbeat is stale and progress is below `TARGET_LEADS`.
+
+## Central leads and phone enrichment
+
+Scraped rows are upserted to Supabase `public.leads` (table owned by hercule.dev) with `status=uncleaned` and a one-word `category` such as `PLOMBIER`. Uncleaned leads are not pushed to Instantly unless `HERCULE_ALLOW_UNCLEANED_INSTANTLY_PUSH=1`.
+
+After the cleaner marks rows `cleaned`, retrieve verified phones (no production run unless you pass `--execute`):
+
+```bash
+python main.py enrich-phones --preset plombier --limit 1000
+python main.py enrich-phones --preset plombier --limit 1000 --execute
+```
+
+Budget **$8 per 1,000 leads** at Outscraper medium-tier rates ($3 emails-and-contacts + $5 phones-enricher) when every lead needs a lookup and yields one number. The first 500 domains and 25 phones each month are free.

@@ -1,0 +1,32 @@
+[
+  {
+    "id": "fixture-1",
+    "email": "jean@dupont.fr",
+    "first_name": "Jean",
+    "last_name": "Dupont",
+    "company": "Dupont Plomberie",
+    "website": "https://dupont.fr",
+    "phone": "",
+    "category": "PLOMBIER",
+    "status": "cleaned",
+    "source": "outscraper",
+    "source_id": "place-1",
+    "phone_enriched_at": null,
+    "phone_enrichment_status": null
+  },
+  {
+    "id": "fixture-2",
+    "email": "done@dupont.fr",
+    "first_name": "Anne",
+    "last_name": "Martin",
+    "company": "Martin",
+    "website": "https://martin.fr",
+    "phone": "+33601020304",
+    "category": "PLOMBIER",
+    "status": "cleaned",
+    "source": "outscraper",
+    "source_id": "place-2",
+    "phone_enriched_at": "2026-10-01T00:00:00+00:00",
+    "phone_enrichment_status": "enriched"
+  }
+]

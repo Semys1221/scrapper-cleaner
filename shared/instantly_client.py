@@ -1099,27 +1099,32 @@ def _row_to_bulk_lead(row: pd.Series) -> dict[str, Any]:
         if pd.notna(value) and str(value).strip():
             lead[field] = str(value).strip()
 
+    from shared.central_leads import core_instantly_custom_variables, normalize_phone
+
+    phone = normalize_phone(row.get("phone") if "phone" in row.index else row.get("Phone"))
+    if phone:
+        lead["phone"] = phone
+
     custom_variables = row.get("custom_variables")
     if isinstance(custom_variables, str) and custom_variables.strip():
         try:
             custom_variables = json.loads(custom_variables)
         except json.JSONDecodeError:
             custom_variables = {}
-    if isinstance(custom_variables, dict) and custom_variables:
-        coerced: dict[str, str | int | float | bool] = {}
-        for key, value in custom_variables.items():
-            if value is None or (isinstance(value, float) and pd.isna(value)):
-                continue
-            if isinstance(value, (dict, list)):
-                continue
-            if isinstance(value, (str, int, float, bool)):
-                coerced[str(key)] = value
-            else:
-                text = str(value).strip()
-                if text:
-                    coerced[str(key)] = text
-        if coerced:
-            lead["custom_variables"] = coerced
+    if not isinstance(custom_variables, dict):
+        custom_variables = {}
+    category = ""
+    if "category" in row.index and pd.notna(row.get("category")):
+        category = str(row.get("category") or "").strip()
+    coerced = core_instantly_custom_variables(
+        custom_variables,
+        phone=phone,
+        category=category,
+        status="cleaned",
+        cleaned="valid",
+    )
+    if coerced:
+        lead["custom_variables"] = coerced
 
     return lead
 

@@ -15,8 +15,11 @@ dev-scraper:
 dev-clean:
 	cd $(ROOT)clean && streamlit run app.py
 
+PY := $(if $(wildcard $(ROOT).venv/bin/python),$(ROOT).venv/bin/python,python3)
+
 test:
-	cd $(ROOT)clean && python -m pytest tests/ -q
+	cd $(ROOT) && $(PY) -m pytest scraper/tests shared/tests -q
+	cd $(ROOT)clean && $(PY) -m pytest tests -q
 
 clean-cli-credits:
 	cd $(ROOT)clean && python cli.py credits

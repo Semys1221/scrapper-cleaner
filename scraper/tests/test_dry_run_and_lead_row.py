@@ -1,0 +1,110 @@
+"""Local scraper smoke: dry-run and one accepted lead, with no error logs."""
+
+from __future__ import annotations
+
+import asyncio
+import os
+import re
+from pathlib import Path
+
+import pytest
+
+os.environ.setdefault("HERCULE_DATA_ROOT", "/tmp/hercule-scraper-tests")
+
+from core_logic import _process_business, activate_output_paths, run_scraper_pipeline  # noqa: E402
+from scrape_log import scrape_log_path  # noqa: E402
+from shared.central_leads import scraped_row_to_lead  # noqa: E402
+
+_ERROR_RE = re.compile(r"\b(ERROR|WARNING|Traceback|CRITICAL)\b")
+
+
+def _assert_clean(text: str) -> None:
+    bad = [line for line in text.splitlines() if _ERROR_RE.search(line)]
+    assert bad == []
+
+
+def test_process_business_maps_uncleaned_plombier_lead(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("HERCULE_DATA_ROOT", str(tmp_path))
+    activate_output_paths("plombier")
+    row, audit = _process_business(
+        {
+            "name": "Dupont Plomberie",
+            "site": "https://dupont.fr",
+            "email": "jean@dupont.fr",
+            "phone": "+33 1 84 80 12 34",
+            "place_id": "place-1",
+            "first_name": "Jean",
+            "last_name": "Dupont",
+            "city": "Lyon",
+            "type": "Plombier",
+            "category": "Plumber",
+        },
+        {
+            "EXCLUDE_DOMAINS": [],
+            "WEBSITE_REQUIRED": True,
+            "TAXONOMY_GATE_ENABLED": False,
+            "SERVICE_DEFAULT": "Plomberie",
+            "SERVICE_RULES": [],
+            "NICHE_GROUP_LABEL": "Plombier",
+            "SUBNICHE_LABEL": "Artisan",
+        },
+        seen_domain=set(),
+        seen_em=set(),
+    )
+    assert audit is not None
+    assert audit["Verdict"] == "accepted"
+    assert row is not None
+    lead = scraped_row_to_lead(row, preset="plombier")
+    assert lead["category"] == "PLOMBIER"
+    assert lead["status"] == "uncleaned"
+    assert lead["company"] == "Dupont Plomberie"
+    assert lead["website"] == "dupont.fr"
+    assert lead["phone"] == "+33184801234"
+    assert lead["first_name"] == "Jean"
+    assert lead["last_name"] == "Dupont"
+    from instantly_client import _lead_payload
+
+    payload = _lead_payload({**row, "Preset": "plombier"}, "list-1")
+    assert payload["phone"] == "+33184801234"
+    assert payload["custom_variables"]["category"] == "PLOMBIER"
+    assert payload["custom_variables"]["status"] == "uncleaned"
+    assert "siret" not in payload.get("custom_variables", {})
+    assert "city" not in payload.get("custom_variables", {})
+
+
+def test_dry_run_log_has_no_errors(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("HERCULE_DATA_ROOT", str(tmp_path))
+    monkeypatch.delenv("HERCULE_ALLOW_UNCLEANED_INSTANTLY_PUSH", raising=False)
+    logs: list[str] = []
+    summary = asyncio.run(run_scraper_pipeline(
+        {
+            "TARGET_LEADS": 3,
+            "TARGET_MODE": "csv_saved",
+            "KEYWORDS": ["plombier"],
+            "LOCATIONS": ["Lyon"],
+            "EXPANSION_KEYWORDS": [],
+            "EXPANSION_LOCATIONS": [],
+            "QUERY_PLANNER_USE_DEPARTMENTS": False,
+            "OUTSCRAPER_API_KEY": "dry-run-key",
+            "OUTSCRAPER_BATCH_SIZE": 5,
+            "OUTSCRAPER_CONCURRENCY": 1,
+            "OUTSCRAPER_LIMIT_PER_QUERY": 5,
+            "EXCLUDE_DOMAINS": [],
+            "ENRICH_ENABLED": False,
+            "PRESET_ID": "plombier",
+        },
+        log_cb=logs.append,
+        progress_cb=lambda _progress: None,
+        metric_cb=lambda *_args: None,
+        dry_run=True,
+        push_to_instantly=False,
+        preset="plombier",
+    ))
+    assert summary["dry_run"] is True
+    assert summary["queries_total"] >= 1
+    text = "\n".join(logs)
+    log_path = Path(scrape_log_path(str(tmp_path / "streamlit_scraper" / "output" / "plombier")))
+    if log_path.is_file():
+        text += "\n" + log_path.read_text(encoding="utf-8")
+    _assert_clean(text)
+    assert "zero Outscraper requests made" in text

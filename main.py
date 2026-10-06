@@ -321,6 +321,11 @@ def scrape(
         raise typer.BadParameter("Use either --reset or --resume, not both.")
 
     config = load_config(preset)
+    from shared.central_leads import uncleaned_instantly_push_allowed
+
+    if push_instantly and not uncleaned_instantly_push_allowed():
+        _log("Instantly push withheld — uncleaned leads stay in Supabase (status=uncleaned).")
+        push_instantly = False
     if push_instantly:
         from bootstrap.validators import require_instantly_list_for_scrape_push
 
@@ -405,6 +410,11 @@ def worker_loop_cmd(
     preset = _validate_preset(preset)
     paths = output_paths(preset)
     config = load_config(preset)
+    from shared.central_leads import uncleaned_instantly_push_allowed
+
+    if push_instantly and not uncleaned_instantly_push_allowed():
+        _log("Instantly push withheld — uncleaned leads stay in Supabase (status=uncleaned).")
+        push_instantly = False
     if push_instantly:
         from bootstrap.validators import require_instantly_list_for_scrape_push
 
@@ -852,11 +862,45 @@ def recover_emails_cmd(
     )
 
 
+@app.command("enrich-phones")
+def enrich_phones_cmd(
+    execute: bool = typer.Option(
+        False,
+        "--execute",
+        help="Call Outscraper and write phones. Omit to print the cost estimate only.",
+    ),
+    limit: int = typer.Option(1000, help="Maximum cleaned leads to consider."),
+    preset: str = typer.Option("", help="Preset id mapped to a one-word category."),
+    fixture: str = typer.Option("", help="JSON fixture of cleaned leads. Skips the production table."),
+    verify: bool = typer.Option(True, "--verify/--no-verify"),
+) -> None:
+    """Retrieve verified phone numbers for cleaned leads. Does not run unless --execute."""
+    from shared.phone_enrichment import cli_main
+
+    argv = ["--limit", str(limit)]
+    if execute:
+        argv.append("--execute")
+    if preset:
+        argv.extend(["--preset", preset])
+    if fixture:
+        argv.extend(["--fixture", fixture])
+    if not verify:
+        argv.append("--no-verify")
+    raise typer.Exit(cli_main(argv))
+
+
 @app.command("push-instantly")
 def push_instantly_cmd(
     preset: str = PresetOption,
 ) -> None:
     """Push CSV rows to Instantly (native duplicate skip via skip_if_in_campaign/list)."""
+    from shared.central_leads import uncleaned_instantly_push_allowed
+
+    if not uncleaned_instantly_push_allowed():
+        raise typer.BadParameter(
+            "Refusing to push uncleaned leads to Instantly. "
+            "Clean them first (status=cleaned), or set HERCULE_ALLOW_UNCLEANED_INSTANTLY_PUSH=1."
+        )
     preset = _validate_preset(preset)
     paths = output_paths(preset)
     config = load_config(preset)

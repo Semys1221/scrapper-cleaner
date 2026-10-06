@@ -40,6 +40,16 @@ LIVE_LIST_TARGET_MODES = frozenset({"instantly_pushed"})
 VALID_TARGET_MODES = frozenset({"csv_saved", "instantly_pushed", "instantly_pushed_run"})
 
 
+def uncleaned_instantly_push_allowed() -> bool:
+    """False unless HERCULE_ALLOW_UNCLEANED_INSTANTLY_PUSH is set.
+
+    Uncleaned leads stay in Supabase. Progress then counts saved leads instead
+    of the Instantly list size.
+    """
+    raw = os.getenv("HERCULE_ALLOW_UNCLEANED_INSTANTLY_PUSH", "")
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
 def target_uses_live_list(mode: str) -> bool:
     return mode in LIVE_LIST_TARGET_MODES
 
@@ -59,7 +69,7 @@ def target_progress_value(
     leads_saved: int = 0,
     instantly_live: int | None = None,
 ) -> int:
-    if mode in CHECKPOINT_PUSH_MODES:
+    if mode in CHECKPOINT_PUSH_MODES and uncleaned_instantly_push_allowed():
         if target_uses_live_list(mode) and instantly_live is not None:
             return instantly_live
         return instantly_pushed
@@ -85,7 +95,7 @@ def is_target_reached(
     """
     if target <= 0:
         return True
-    if target_uses_live_list(mode) and config:
+    if target_uses_live_list(mode) and config and uncleaned_instantly_push_allowed():
         checkpoint_met = instantly_pushed >= target
         near_target = instantly_pushed >= target - 50 or instantly_pushed >= int(
             target * 0.95

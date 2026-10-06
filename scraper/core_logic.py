@@ -78,12 +78,33 @@ def output_paths(preset: str = "biggy_agency") -> OutputPaths:
 
 _default_paths = output_paths("biggy_agency")
 _active = _default_paths
+_active_preset = "biggy_agency"
 
 
 def activate_output_paths(preset: str = "biggy_agency") -> OutputPaths:
-    global _active
-    _active = output_paths(preset)
+    global _active, _active_preset
+    _active_preset = preset or "biggy_agency"
+    _active = output_paths(_active_preset)
     return _active
+
+
+def _uncleaned_push_allowed() -> bool:
+    from shared.central_leads import uncleaned_instantly_push_allowed
+
+    return uncleaned_instantly_push_allowed()
+
+
+def _apply_uncleaned_push_policy(
+    push_to_instantly: bool,
+    log_cb: Callable[[str], None],
+) -> bool:
+    if _uncleaned_push_allowed():
+        return push_to_instantly
+    if push_to_instantly:
+        log_cb(
+            "Instantly push withheld — uncleaned leads stay in Supabase (status=uncleaned)."
+        )
+    return False
 
 
 # Backward-compatible exports (biggy_agency default paths)
@@ -121,6 +142,10 @@ _CSV_COLUMNS = [
     "LeadScore",
     "RegistrySource",
     "RegistryFetchedAt",
+    "Phone",
+    "FirstName",
+    "LastName",
+    "PlaceId",
 ]
 _FILTER_AUDIT_COLUMNS = ["Email", "Company", "Category", "Verdict", "Reason"]
 _ENRICH_AUDIT_COLUMNS = [
@@ -483,13 +508,29 @@ def _sync_mev_emails_sidecar(log_cb: Callable[[str], None] | None = None) -> int
     return count
 
 
+def _csv_fieldnames(path: str) -> list[str]:
+    if os.path.isfile(path) and os.path.getsize(path) > 0:
+        with open(path, encoding="utf-8", newline="") as handle:
+            header = next(csv.reader(handle), [])
+        if header:
+            return header
+    return list(_CSV_COLUMNS)
+
+
 def _append_lead_row(row: dict[str, str]) -> None:
+    fieldnames = _csv_fieldnames(_active.csv)
     write_header = not os.path.exists(_active.csv) or os.path.getsize(_active.csv) == 0
     with open(_active.csv, "a", encoding="utf-8", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=_CSV_COLUMNS)
+        writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
         if write_header:
             writer.writeheader()
-        writer.writerow({col: row.get(col, "") for col in _CSV_COLUMNS})
+        writer.writerow({col: row.get(col, "") for col in fieldnames})
+    try:
+        from shared.central_leads import persist_scraped_lead
+
+        persist_scraped_lead(row, preset=_active_preset)
+    except Exception as exc:
+        logger.warning("Central leads upsert skipped: %s", exc)
 
 
 def _append_raw_business(business: dict[str, Any]) -> None:
@@ -857,6 +898,10 @@ def _process_business(
         "Subtypes": fields["Subtypes"],
         "Siret": siret,
         "Siren": siren,
+        "Phone": str(b.get("phone") or "").strip(),
+        "FirstName": str(b.get("first_name") or "").strip(),
+        "LastName": str(b.get("last_name") or "").strip(),
+        "PlaceId": str(b.get("place_id") or b.get("google_id") or "").strip(),
     }
     # Ephemeral: keep reviews for the ingester (not written to CSV columns)
     reviews = b.get("reviews_data")
@@ -1643,7 +1688,12 @@ async def run_scraper_pipeline(
             f"concurrency {enrich_cfg['concurrency']}, timeout {enrich_cfg['timeout_ms']}ms"
         )
     else:
-        log_cb("Website enrich disabled — scraped leads go directly to Instantly push")
+        if _uncleaned_push_allowed():
+            log_cb("Website enrich disabled — scraped leads go directly to Instantly push")
+        else:
+            log_cb(
+                "Website enrich disabled — scraped leads are saved as uncleaned Supabase rows"
+            )
     if bool(config.get("PAPPERS_ENABLED", False)):
         pappers_batch = _pappers_batch_settings(config)
         max_effectif = int(config.get("PAPPERS_MAX_EMPLOYEES") or 0)
@@ -1687,27 +1737,35 @@ async def run_scraper_pipeline(
         )
 
     if dry_run:
+        push_to_instantly = _apply_uncleaned_push_policy(push_to_instantly, log_cb)
         if not config.get("OUTSCRAPER_API_KEY"):
             log_cb("WARNING: OUTSCRAPER_API_KEY is missing")
         else:
             log_cb("OUTSCRAPER_API_KEY present (dry-run — no API calls)")
-        if is_instantly_push_mode(mode):
-            if push_to_instantly and config.get("INSTANTLY_API_KEY") and config.get("INSTANTLY_LIST_ID"):
+        if is_instantly_push_mode(mode) and push_to_instantly:
+            if config.get("INSTANTLY_API_KEY") and config.get("INSTANTLY_LIST_ID"):
                 log_cb(f"Instantly push enabled — target metric is {mode}")
             else:
                 log_cb(f"WARNING: TARGET_MODE={mode} requires Instantly keys + push")
+        elif is_instantly_push_mode(mode):
+            log_cb(
+                f"Target mode {mode} counts saved leads while uncleaned Instantly push is off."
+            )
         log_cb("Dry-run complete — zero Outscraper requests made.")
         summary["queries_total"] = slot_estimate
+        if slot_estimate and settings.batch_size:
+            summary["batches_total"] = (slot_estimate + settings.batch_size - 1) // settings.batch_size
         progress_cb(1.0)
         return summary
 
     if not config.get("OUTSCRAPER_API_KEY"):
         raise SystemExit("OUTSCRAPER_API_KEY is required for live scrape")
 
-    if is_instantly_push_mode(mode):
+    if is_instantly_push_mode(mode) and _uncleaned_push_allowed():
         if not push_to_instantly:
             push_to_instantly = True
             log_cb(f"Auto-enabling Instantly push (target metric = {mode}).")
+    push_to_instantly = _apply_uncleaned_push_policy(push_to_instantly, log_cb)
 
     if push_to_instantly and not dry_run:
         from bootstrap.validators import require_instantly_list_for_scrape_push
@@ -1729,7 +1787,12 @@ async def run_scraper_pipeline(
             log_cb(
                 "Config fingerprint changed — migrating checkpoint and continuing resume."
             )
-        if existing_state and existing_state.get("push_to_instantly") and not push_to_instantly:
+        if (
+            existing_state
+            and existing_state.get("push_to_instantly")
+            and not push_to_instantly
+            and _uncleaned_push_allowed()
+        ):
             push_to_instantly = True
             log_cb("Resuming with auto-push (enabled in saved run).")
     elif not reset:
@@ -2425,6 +2488,8 @@ async def run_email_recovery(
     if not bool(config.get("OUTSCRAPER_EMAIL_RECOVERY_ENABLED", True)):
         log_cb("Email recovery disabled (OUTSCRAPER_EMAIL_RECOVERY_ENABLED=false).")
         return summary
+
+    push_to_instantly = _apply_uncleaned_push_policy(push_to_instantly, log_cb)
 
     api_key = str(config.get("OUTSCRAPER_API_KEY") or "").strip()
     if not api_key:
