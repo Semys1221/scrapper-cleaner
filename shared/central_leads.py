@@ -106,7 +106,11 @@ PRESET_CATEGORY: dict[str, str] = {
     "terrassement_vrd": "TERRASSEMENT",
     "veterinaires": "VETERINAIRE",
     "_adhoc": "ADHOC",
+    # Legacy default when a caller omits the preset. Same bucket as _adhoc.
+    "biggy_agency": "ADHOC",
 }
+
+EMAIL_MAX_LENGTH = 320
 
 # Registry and Google fields that are not columns on public.leads.
 _PAYLOAD_FIELDS = (
@@ -257,6 +261,8 @@ def scraped_row_to_lead(row: dict[str, Any], *, preset: str) -> dict[str, Any]:
     email = normalize_email(row.get("Email") or row.get("email"))
     if "@" not in email:
         raise ValueError("scraped lead is missing an email")
+    if len(email) > EMAIL_MAX_LENGTH:
+        raise ValueError(f"email length {len(email)} exceeds {EMAIL_MAX_LENGTH}")
     now = utc_now()
     return {
         "email": email,
@@ -374,6 +380,66 @@ def _collapse_leads_by_email(
     return [pending[email] for email in order], skipped
 
 
+def classify_probe_error(exc: Exception) -> str:
+    """Label a leads probe failure: rpc-missing, auth, permission, network, or unknown."""
+    status = getattr(exc, "status_code", None)
+    response = getattr(exc, "response", None)
+    if not isinstance(status, int) and response is not None:
+        status = getattr(response, "status_code", None)
+    code = getattr(exc, "code", None)
+    blob = f"{type(exc).__name__} {exc} {code or ''}".lower()
+    if status == 401 or any(
+        token in blob
+        for token in ("invalid api key", "invalid jwt", "jwt expired", "unauthorized", "not authenticated")
+    ):
+        return "auth"
+    if status == 403 or any(
+        token in blob
+        for token in ("permission denied", "insufficient privilege", "42501", "not authorized")
+    ):
+        return "permission"
+    if any(
+        token in blob
+        for token in (
+            "pgrst202",
+            "could not find the function",
+            "function not found",
+            "does not exist",
+            "schema cache",
+        )
+    ):
+        return "rpc-missing"
+    if isinstance(exc, (TimeoutError, ConnectionError, OSError)) or any(
+        token in blob
+        for token in ("timeout", "timed out", "connection", "network", "connecterror")
+    ):
+        return "network"
+    return "unknown"
+
+
+def _probe_error_message(exc: Exception, *, what: str) -> str:
+    kind = classify_probe_error(exc)
+    if kind == "rpc-missing":
+        return (
+            f"Central leads upsert RPC {LEADS_UPSERT_RPC} is not available ({exc}). "
+            "Apply migrations/proposed/027b_leads_upsert_uncleaned.sql after 026 "
+            "before scraping or cleaning."
+        )
+    if kind == "auth":
+        return (
+            f"Supabase authentication failed while checking {what}: {exc}. "
+            "Check SUPABASE_SERVICE_ROLE_KEY."
+        )
+    if kind == "permission":
+        return (
+            f"Supabase permission denied while checking {what}: {exc}. "
+            f"Grant execute on {LEADS_UPSERT_RPC} to service_role."
+        )
+    if kind == "network":
+        return f"Network error while checking {what}: {exc}."
+    return f"Central leads check failed for {what}: {exc}."
+
+
 def probe_leads_table(store: LeadsStore | None = None) -> None:
     """Fail before Outscraper spend when the table or the 027b upsert RPC is missing.
 
@@ -386,10 +452,9 @@ def probe_leads_table(store: LeadsStore | None = None) -> None:
     try:
         target.client.table(target.table).select("email").limit(1).execute()
     except Exception as exc:
-        logger.error("Central leads table %s is not readable: %s", target.table, exc)
-        raise RuntimeError(
-            f"Central leads table {target.table} is not readable: {exc}"
-        ) from exc
+        message = _probe_error_message(exc, what=f"table {target.table}")
+        logger.error("%s", message)
+        raise RuntimeError(message) from exc
     try:
         target.client.rpc(
             LEADS_UPSERT_RPC,
@@ -400,16 +465,9 @@ def probe_leads_table(store: LeadsStore | None = None) -> None:
             },
         ).execute()
     except Exception as exc:
-        logger.error(
-            "Central leads upsert RPC %s is missing (apply 027b after 026): %s",
-            LEADS_UPSERT_RPC,
-            exc,
-        )
-        raise RuntimeError(
-            f"Central leads upsert RPC {LEADS_UPSERT_RPC} is not available. "
-            "Apply migrations/proposed/027b_leads_upsert_uncleaned.sql after 026 "
-            "before scraping or cleaning."
-        ) from exc
+        message = _probe_error_message(exc, what=LEADS_UPSERT_RPC)
+        logger.error("%s", message)
+        raise RuntimeError(message) from exc
 
 
 def core_instantly_custom_variables(

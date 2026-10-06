@@ -517,20 +517,34 @@ def _csv_fieldnames(path: str) -> list[str]:
     return list(_CSV_COLUMNS)
 
 
+class LeadPersistenceError(RuntimeError):
+    """A Supabase lead save failed. The scrape stops so resume can retry it."""
+
+
 # Supabase saves are batched so the async loop is not blocked on every row.
 # The leads CSV is written only after the batch upsert succeeds. Rows still
 # waiting live in pending_supabase.jsonl so a failed save is retried on resume
-# instead of being treated as already scraped.
+# instead of being treated as already scraped. A row that can never be stored
+# (validation, email longer than 320) is moved to pending_supabase.rejected.jsonl.
 LEAD_SAVE_BATCH = 50
 _PENDING_LEAD_ROWS: list[dict[str, str]] = []
+_COMMITTED_EMAILS: set[str] | None = None
+_COMMITTED_EMAILS_PATH: str | None = None
 
 
 def _reset_lead_save_buffer() -> None:
+    global _COMMITTED_EMAILS, _COMMITTED_EMAILS_PATH
     _PENDING_LEAD_ROWS.clear()
+    _COMMITTED_EMAILS = None
+    _COMMITTED_EMAILS_PATH = None
 
 
 def _sidecar_path() -> str:
     return os.path.join(os.path.dirname(_active.csv), "pending_supabase.jsonl")
+
+
+def _rejected_sidecar_path() -> str:
+    return os.path.join(os.path.dirname(_active.csv), "pending_supabase.rejected.jsonl")
 
 
 def _public_lead_row(row: dict[str, Any]) -> dict[str, Any]:
@@ -590,6 +604,59 @@ def _write_csv_row(row: dict[str, str]) -> None:
         writer.writerow({col: row.get(col, "") for col in fieldnames})
 
 
+def _committed_emails() -> set[str]:
+    """Emails already in the leads CSV. Loaded once per file, then kept in memory."""
+    global _COMMITTED_EMAILS, _COMMITTED_EMAILS_PATH
+    path = _active.csv
+    if _COMMITTED_EMAILS is None or _COMMITTED_EMAILS_PATH != path:
+        seen, _domains = _load_seen_from_csv()
+        _COMMITTED_EMAILS = set(seen)
+        _COMMITTED_EMAILS_PATH = path
+    return _COMMITTED_EMAILS
+
+
+def _row_email(row: dict[str, Any]) -> str:
+    return str(row.get("Email") or row.get("email") or "").strip().lower()
+
+
+def _row_permanent_error(row: dict[str, Any]) -> str | None:
+    """Validation failures that will never succeed on retry."""
+    from shared.central_leads import scraped_row_to_lead
+
+    try:
+        scraped_row_to_lead(row, preset=_active_preset)
+    except ValueError as exc:
+        return str(exc)
+    return None
+
+
+def _append_rejected_row(row: dict[str, Any], error: str) -> None:
+    path = _rejected_sidecar_path()
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    record = _public_lead_row(row)
+    record["error"] = error
+    with open(path, "a", encoding="utf-8") as handle:
+        handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+    logger.error("Rejected lead permanently (%s): %s", error, _row_email(row) or row.get("Company"))
+
+
+def _separate_permanent_rejects(rows: list[dict[str, str]]) -> list[dict[str, str]]:
+    """Move rows that can never be stored out of the retry sidecar."""
+    saveable: list[dict[str, str]] = []
+    rejected_ids: set[int] = set()
+    for row in rows:
+        error = _row_permanent_error(row)
+        if error is None:
+            saveable.append(row)
+            continue
+        _append_rejected_row(row, error)
+        rejected_ids.add(id(row))
+    if rejected_ids:
+        _PENDING_LEAD_ROWS[:] = [row for row in _PENDING_LEAD_ROWS if id(row) not in rejected_ids]
+        _rewrite_sidecar(_PENDING_LEAD_ROWS)
+    return saveable
+
+
 def _persist_lead_batch(rows: list[dict[str, str]]) -> None:
     from shared.central_leads import persist_scraped_leads
 
@@ -598,10 +665,10 @@ def _persist_lead_batch(rows: list[dict[str, str]]) -> None:
 
 def _commit_saved_lead_rows(batch: list[dict[str, str]]) -> None:
     """Write the CSV only after the Supabase upsert has returned."""
-    already, _domains = _load_seen_from_csv()
+    already = _committed_emails()
     saved_emails: set[str] = set()
     for row in batch:
-        email = str(row.get("Email") or "").strip().lower()
+        email = _row_email(row)
         if email:
             saved_emails.add(email)
         if email and email in already:
@@ -622,15 +689,23 @@ def _commit_saved_lead_rows(batch: list[dict[str, str]]) -> None:
     _rewrite_sidecar(remaining)
 
 
+def _raise_persistence_error(exc: Exception) -> None:
+    logger.error("Central leads upsert failed: %s", exc)
+    if isinstance(exc, LeadPersistenceError):
+        raise exc
+    raise LeadPersistenceError(str(exc)) from exc
+
+
 def _flush_pending_lead_rows_sync() -> None:
     if not _PENDING_LEAD_ROWS:
         return
-    batch = list(_PENDING_LEAD_ROWS)
+    batch = _separate_permanent_rejects(list(_PENDING_LEAD_ROWS))
+    if not batch:
+        return
     try:
         _persist_lead_batch(batch)
     except Exception as exc:
-        logger.error("Central leads upsert failed: %s", exc)
-        raise
+        _raise_persistence_error(exc)
     _commit_saved_lead_rows(batch)
 
 
@@ -638,12 +713,13 @@ async def _flush_pending_lead_rows_async() -> None:
     """Upsert off the event loop, then write the CSV on success."""
     if not _PENDING_LEAD_ROWS:
         return
-    batch = list(_PENDING_LEAD_ROWS)
+    batch = _separate_permanent_rejects(list(_PENDING_LEAD_ROWS))
+    if not batch:
+        return
     try:
         await asyncio.to_thread(_persist_lead_batch, batch)
     except Exception as exc:
-        logger.error("Central leads upsert failed: %s", exc)
-        raise
+        _raise_persistence_error(exc)
     _commit_saved_lead_rows(batch)
 
 
@@ -1336,6 +1412,10 @@ async def clear_local_leads(
         os.remove(paths.raw_jsonl)
     if os.path.isfile(paths.enrich_audit):
         os.remove(paths.enrich_audit)
+    sidecar = os.path.join(os.path.dirname(paths.csv), "pending_supabase.jsonl")
+    if os.path.isfile(sidecar):
+        os.remove(sidecar)
+    _reset_lead_save_buffer()
     clear_scrape_state(paths.scrape_state)
 
     return {
@@ -1602,12 +1682,6 @@ async def _run_planner_scrape(
             if not results and client.last_error:
                 log_cb(f"Outscraper batch failed: {client.last_error}")
             per_query = count_places_per_query(results, len(batch.queries))
-            planner.record_batch_result(
-                batch,
-                raw_places_per_query=per_query,
-                limit_per_query=settings.limit_per_query,
-            )
-            batches_run += 1
 
             def _persist_now(ls: int, lev: int, ip: int) -> None:
                 if run_state is None:
@@ -1655,6 +1729,13 @@ async def _run_planner_scrape(
                 last_completed=batch.batch_index,
                 on_progress_persist=_persist_now,
             )
+            await _flush_pending_lead_rows_async()
+            planner.record_batch_result(
+                batch,
+                raw_places_per_query=per_query,
+                limit_per_query=settings.limit_per_query,
+            )
+            batches_run += 1
             log_cb(
                 f"Batch {batch.batch_index + 1} processed. "
                 f"Scraped: {leads_saved} | Enriched: {leads_enriched_valid} | "
@@ -1711,11 +1792,22 @@ async def _run_planner_scrape(
             inflight_tasks,
             return_when=asyncio.FIRST_COMPLETED,
         )
+        persistence_error: LeadPersistenceError | None = None
         for finished in done:
             try:
                 await finished
+            except LeadPersistenceError as exc:
+                persistence_error = exc
+                break
             except Exception as exc:
                 log_cb(f"Batch processing error: {exc}")
+        if persistence_error is not None:
+            for task in pending:
+                task.cancel()
+            if pending:
+                await asyncio.gather(*pending, return_exceptions=True)
+            log_cb(f"Lead save failed — stopping the scrape: {persistence_error}")
+            raise persistence_error
 
     if inflight_tasks:
         await asyncio.gather(*inflight_tasks, return_exceptions=True)

@@ -32,6 +32,7 @@ def test_category_for_preset_matches_hercule_names() -> None:
     assert category_for_preset("courtiers_credit_immobilier") == "COURTIER"
     assert category_for_preset("courtiers_prevoyance_b2b") == "IAS"
     assert category_for_preset("runbook_test") == "TEST"
+    assert category_for_preset("biggy_agency") == "ADHOC"
 
 
 def test_unknown_preset_does_not_guess_a_category() -> None:
@@ -433,6 +434,27 @@ def test_probe_requires_upsert_rpc() -> None:
     missing = _ProbeClient(rpc_error=RuntimeError("function not found"))
     with pytest.raises(RuntimeError, match="027b_leads_upsert_uncleaned"):
         probe_leads_table(SupabaseLeadsStore(missing, "leads"))
+
+    class _StatusError(RuntimeError):
+        def __init__(self, status_code: int, message: str) -> None:
+            super().__init__(message)
+            self.status_code = status_code
+
+    with pytest.raises(RuntimeError, match="authentication failed"):
+        probe_leads_table(
+            SupabaseLeadsStore(_ProbeClient(rpc_error=_StatusError(401, "Invalid API key")), "leads")
+        )
+    with pytest.raises(RuntimeError, match="permission denied"):
+        probe_leads_table(
+            SupabaseLeadsStore(
+                _ProbeClient(rpc_error=_StatusError(403, "permission denied for function")),
+                "leads",
+            )
+        )
+    with pytest.raises(RuntimeError, match="Network error"):
+        probe_leads_table(
+            SupabaseLeadsStore(_ProbeClient(rpc_error=ConnectionError("connection timed out")), "leads")
+        )
 
 
 def test_supabase_client_is_reused(monkeypatch) -> None:
