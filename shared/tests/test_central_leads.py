@@ -234,7 +234,7 @@ def test_upsert_sql_matches_email_normalized_contract() -> None:
         Path(__file__).resolve().parents[2]
         / "migrations"
         / "proposed"
-        / "027b_leads_upsert_uncleaned.sql"
+        / "030_leads_upsert_uncleaned.sql"
     )
     sql = sql_path.read_text(encoding="utf-8")
     assert "DO NOT APPLY" in sql
@@ -440,7 +440,7 @@ def test_probe_requires_upsert_rpc() -> None:
         )
     ]
     missing = _ProbeClient(rpc_error=RuntimeError("function not found"))
-    with pytest.raises(RuntimeError, match="027b_leads_upsert_uncleaned"):
+    with pytest.raises(RuntimeError, match="030_leads_upsert_uncleaned"):
         probe_leads_table(SupabaseLeadsStore(missing, "leads"))
 
     class _StatusError(RuntimeError):
@@ -469,19 +469,19 @@ def test_probe_requires_upsert_rpc() -> None:
     )
     with pytest.raises(RuntimeError, match="apply 026 first") as missing_table_exc:
         probe_leads_table(SupabaseLeadsStore(missing_table, "leads"))
-    assert "027b" not in str(missing_table_exc.value)
+    assert "030" not in str(missing_table_exc.value)
 
     schema_cache = _ProbeClient(
         table_error=RuntimeError("Could not find the table 'public.leads' in the schema cache (PGRST205)")
     )
     with pytest.raises(RuntimeError, match="apply 026 first") as schema_cache_exc:
         probe_leads_table(SupabaseLeadsStore(schema_cache, "leads"))
-    assert "027b" not in str(schema_cache_exc.value)
+    assert "030" not in str(schema_cache_exc.value)
 
     for auth_error in (RuntimeError("PGRST301"), RuntimeError("JWSError: malformed JWT")):
         with pytest.raises(RuntimeError, match="authentication failed") as auth_exc:
             probe_leads_table(SupabaseLeadsStore(_ProbeClient(rpc_error=auth_error), "leads"))
-        assert "027b" not in str(auth_exc.value)
+        assert "030" not in str(auth_exc.value)
         assert "apply 026 first" not in str(auth_exc.value)
 
 

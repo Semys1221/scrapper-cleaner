@@ -495,7 +495,7 @@ def _probe_error_message(exc: Exception, *, what: str) -> str:
     if kind == "rpc-missing":
         return (
             f"Central leads upsert RPC {LEADS_UPSERT_RPC} is not available ({exc}). "
-            "Apply migrations/proposed/027b_leads_upsert_uncleaned.sql after 026 "
+            "Apply migrations/proposed/030_leads_upsert_uncleaned.sql after 026 "
             "before scraping or cleaning."
         )
     if kind == "auth":
@@ -514,7 +514,7 @@ def _probe_error_message(exc: Exception, *, what: str) -> str:
 
 
 def probe_leads_table(store: LeadsStore | None = None) -> None:
-    """Fail before Outscraper spend when the table or the 027b upsert RPC is missing.
+    """Fail before Outscraper spend when the table or the 030 upsert RPC is missing.
 
     Per-row writes still raise on their own. This only runs when credentials exist.
     The RPC check is an empty-array call: it inserts nothing.

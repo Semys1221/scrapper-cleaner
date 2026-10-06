@@ -861,7 +861,7 @@ def _remember_rejected(rows: list[dict[str, str]], done_bad: set[str]) -> None:
 def _raise_mass_rejection(detail: str) -> None:
     message = (
         f"{detail} This usually means a schema mismatch on the live public.leads database "
-        "(026/027b). Fix the schema before resuming; the scrape is stopping with no further "
+        "(026/030). Fix the schema before resuming; the scrape is stopping with no further "
         "Outscraper calls."
     )
     logger.error("%s", message)

@@ -14,7 +14,7 @@
 -- ---------------------------------------------------------------------------
 -- Unique key: email_normalized GENERATED ALWAYS AS (lower(btrim(email))) STORED.
 -- This pipeline does not write email_normalized.
--- Upsert: migrations/proposed/027b_leads_upsert_uncleaned.sql (apply after 026).
+-- Upsert: migrations/proposed/030_leads_upsert_uncleaned.sql (apply after 026).
 --   ON CONFLICT (email_normalized)
 --   status moves only when lead_status_rank(incoming) is higher
 --   category kept unless null; empty name/company/website/phone filled
