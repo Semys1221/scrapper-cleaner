@@ -9,6 +9,10 @@ from typing import Any, Callable, Protocol
 from outscraper import OutscraperClient as _SdkClient
 
 
+class OutscraperRequestError(RuntimeError):
+    """Outscraper call failed. Callers must not treat this as an empty result."""
+
+
 class _PollSettings(Protocol):
     poll_initial_s: float
     poll_interval_s: float
@@ -280,7 +284,7 @@ class OutscraperClient:
             result = await asyncio.to_thread(_call)
         except Exception as exc:
             self.last_error = str(exc)
-            return []
+            raise OutscraperRequestError(str(exc)) from exc
 
         if result is None:
             return []
@@ -306,7 +310,7 @@ class OutscraperClient:
             result = await asyncio.to_thread(_call)
         except Exception as exc:
             self.last_error = str(exc)
-            return []
+            raise OutscraperRequestError(str(exc)) from exc
 
         if result is None:
             return []

@@ -13,6 +13,6 @@ beautifulsoup4>=4.12
 lxml>=5.0
 rapidfuzz>=3.0
 trafilatura>=1.12
-selectolax>=0.3
+selectolax>=1.0
 ftfy>=6.2
 prometheus_client>=0.20

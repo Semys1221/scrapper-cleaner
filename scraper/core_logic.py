@@ -525,12 +525,13 @@ def _append_lead_row(row: dict[str, str]) -> None:
         if write_header:
             writer.writeheader()
         writer.writerow({col: row.get(col, "") for col in fieldnames})
-    try:
-        from shared.central_leads import persist_scraped_lead
+    from shared.central_leads import persist_scraped_lead
 
+    try:
         persist_scraped_lead(row, preset=_active_preset)
     except Exception as exc:
-        logger.warning("Central leads upsert skipped: %s", exc)
+        logger.error("Central leads upsert failed: %s", exc)
+        raise
 
 
 def _append_raw_business(business: dict[str, Any]) -> None:
@@ -1602,6 +1603,10 @@ async def run_scraper_pipeline(
     reset: bool = False,
     preset: str = "biggy_agency",
 ) -> dict[str, Any]:
+    if not dry_run:
+        from shared.central_leads import probe_leads_table
+
+        probe_leads_table()
     from scrape_state import (
         apply_pipeline_config_migration,
         build_config_fingerprint,

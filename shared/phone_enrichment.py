@@ -41,6 +41,7 @@ VERIFICATION_USD_PER_1000 = 5.0
 ENRICHED = "enriched"
 NOT_FOUND = "not_found"
 INVALID = "invalid"
+ERROR = "error"
 SKIPPED = "skipped"
 
 _ERROR_STATUS = {"failure", "error", "failed"}
@@ -252,19 +253,41 @@ def _finish(
     }
 
 
+def _without_private(lead: dict[str, Any]) -> dict[str, Any]:
+    return {
+        key: value
+        for key, value in lead.items()
+        if not str(key).startswith("_") and key != "clear_unverified_phone"
+    }
+
+
+def _error_row(lead: dict[str, Any]) -> dict[str, Any]:
+    """Outage marker. phone_enriched_at is omitted so the lead stays retryable."""
+    row = _without_private(lead)
+    row.pop("phone_enriched_at", None)
+    row["phone_enrichment_status"] = ERROR
+    row["updated_at"] = utc_now()
+    return row
+
+
 def enrich_cleaned_leads(
     leads: list[dict[str, Any]],
     lookup: PhoneLookup | None,
     *,
     verify: bool = True,
     log_cb: Callable[[str], None] | None = None,
+    on_batch: Callable[[list[dict[str, Any]]], None] | None = None,
 ) -> EnrichmentResult:
-    """Enrich cleaned leads. ``lookup`` is required only when a lead still needs a call."""
+    """Enrich cleaned leads. ``lookup`` is required only when a lead still needs a call.
+
+    Each paid batch is handed to ``on_batch`` before the next Outscraper call.
+    A client error is persisted as ``error`` without ``phone_enriched_at`` and re-raised.
+    """
     result = EnrichmentResult()
     pending: list[dict[str, Any]] = []
     for lead in leads:
         if needs_phone_enrichment(lead):
-            pending.append(lead)
+            pending.append(dict(lead))
         else:
             result.skipped_already_enriched += 1
     result.eligible = len(pending)
@@ -281,9 +304,25 @@ def enrich_cleaned_leads(
     if not pending:
         return result
 
+    def _persist(rows: list[dict[str, Any]], *, final: bool) -> None:
+        if on_batch and rows:
+            on_batch(rows)
+        if final:
+            result.updated.extend(_without_private(row) for row in rows)
+
+    def _fail(batch_leads: list[dict[str, Any]], exc: BaseException) -> None:
+        errored = [_error_row(lead) for lead in batch_leads]
+        for row in errored:
+            message = f"ERROR phone enrichment outage for {row.get('email')}: {exc}"
+            logger.error(message)
+            _log(result, message, log_cb)
+        _persist(errored, final=True)
+        raise exc
+
     size = _batch_size()
     verify_queue: list[tuple[dict[str, Any], str]] = []
     no_call: list[dict[str, Any]] = []
+    domain_leads: list[dict[str, Any]] = []
 
     for lead in pending:
         domain = website_domain(str(lead.get("website") or ""))
@@ -292,78 +331,113 @@ def enrich_cleaned_leads(
             verify_queue.append((lead, existing_phone))
             continue
         if existing_phone and not verify:
-            result.updated.append(_finish(lead, phone=existing_phone, enrichment_status=ENRICHED))
             result.verified += 1
+            _persist([_finish(lead, phone=existing_phone, enrichment_status=ENRICHED)], final=True)
             continue
         if not domain:
             no_call.append(lead)
             continue
-        # Filled below after the contacts call.
         lead["_enrich_domain"] = domain
+        domain_leads.append(lead)
 
-    for lead in no_call:
-        result.not_found += 1
-        result.updated.append(_finish(lead, phone="", enrichment_status=NOT_FOUND))
     if no_call:
         _log(result, f"Phone enrichment — {len(no_call)} lead(s) have no website and no phone.", log_cb)
+        finished = [
+            _finish(lead, phone=normalize_phone(lead.get("phone")), enrichment_status=NOT_FOUND)
+            for lead in no_call
+        ]
+        result.not_found += len(finished)
+        _persist(finished, final=True)
 
-    domains = []
-    seen_domains: set[str] = set()
-    domain_leads = [lead for lead in pending if lead.get("_enrich_domain")]
-    for lead in domain_leads:
-        domain = str(lead["_enrich_domain"])
-        if domain not in seen_domains:
-            seen_domains.add(domain)
-            domains.append(domain)
-
-    contacts_by_domain: dict[str, dict[str, Any]] = {}
-    if domains:
-        if lookup is None:
-            raise PhonePayloadError("phone lookup client is required to retrieve numbers")
-        for offset in range(0, len(domains), size):
-            batch = domains[offset : offset + size]
-            _log(result, f"emails-and-contacts batch {offset // size + 1} — {len(batch)} domain(s).", log_cb)
-            records = validate_contacts_payload(lookup.emails_and_contacts(batch))
-            contacts_by_domain.update(_index_contacts(records))
-
-    for lead in domain_leads:
-        domain = str(lead.pop("_enrich_domain"))
-        item = contacts_by_domain.get(domain)
-        candidates = extract_phone_candidates(item) if item else []
-        if not candidates:
-            result.not_found += 1
-            result.updated.append(_finish(lead, phone="", enrichment_status=NOT_FOUND))
-            continue
-        result.retrieved += 1
-        if verify:
-            verify_queue.append((lead, candidates[0]))
-        else:
-            result.verified += 1
-            result.updated.append(_finish(lead, phone=candidates[0], enrichment_status=ENRICHED))
-
-    if verify_queue:
+    def _verify_pairs(pairs: list[tuple[dict[str, Any], str]], *, label: str) -> None:
+        if not pairs:
+            return
         if lookup is None:
             raise PhonePayloadError("phone lookup client is required to verify numbers")
-        phones = []
-        seen_phones: set[str] = set()
-        for _, phone in verify_queue:
-            if phone not in seen_phones:
-                seen_phones.add(phone)
+        phones: list[str] = []
+        by_phone: dict[str, list[dict[str, Any]]] = {}
+        for lead, phone in pairs:
+            by_phone.setdefault(phone, []).append(lead)
+            if phone not in phones:
                 phones.append(phone)
-        verified_by_phone: dict[str, dict[str, Any]] = {}
         for offset in range(0, len(phones), size):
             batch = phones[offset : offset + size]
-            _log(result, f"phones-enricher batch {offset // size + 1} — {len(batch)} number(s).", log_cb)
-            records = validate_phones_enricher_payload(lookup.phones_enricher(batch))
-            verified_by_phone.update(_index_verified(records))
-        for lead, phone in verify_queue:
-            item = verified_by_phone.get(phone)
-            if item and phone_is_verified(item):
-                result.verified += 1
-                result.updated.append(_finish(lead, phone=phone, enrichment_status=ENRICHED))
+            batch_leads = [lead for phone in batch for lead in by_phone[phone]]
+            _log(
+                result,
+                f"phones-enricher {label} batch {offset // size + 1} — {len(batch)} number(s).",
+                log_cb,
+            )
+            try:
+                records = validate_phones_enricher_payload(lookup.phones_enricher(batch))
+            except Exception as exc:
+                _fail(batch_leads, exc)
+            verified_by_phone = _index_verified(records)
+            finished: list[dict[str, Any]] = []
+            for phone in batch:
+                item = verified_by_phone.get(phone)
+                for lead in by_phone[phone]:
+                    if item and phone_is_verified(item):
+                        result.verified += 1
+                        finished.append(_finish(lead, phone=phone, enrichment_status=ENRICHED))
+                    else:
+                        result.invalid += 1
+                        original = normalize_phone(lead.get("phone"))
+                        row = _finish(lead, phone=original, enrichment_status=INVALID)
+                        if not original:
+                            row["clear_unverified_phone"] = True
+                        finished.append(row)
+            _persist(finished, final=True)
+
+    _verify_pairs(verify_queue, label="existing")
+
+    by_domain: dict[str, list[dict[str, Any]]] = {}
+    domains: list[str] = []
+    for lead in domain_leads:
+        domain = str(lead["_enrich_domain"])
+        if domain not in by_domain:
+            domains.append(domain)
+            by_domain[domain] = []
+        by_domain[domain].append(lead)
+
+    if domains and lookup is None:
+        raise PhonePayloadError("phone lookup client is required to retrieve numbers")
+
+    for offset in range(0, len(domains), size):
+        batch = domains[offset : offset + size]
+        batch_leads = [lead for domain in batch for lead in by_domain[domain]]
+        _log(result, f"emails-and-contacts batch {offset // size + 1} — {len(batch)} domain(s).", log_cb)
+        try:
+            records = validate_contacts_payload(lookup.emails_and_contacts(batch))  # type: ignore[union-attr]
+        except Exception as exc:
+            _fail(batch_leads, exc)
+        contacts_by_domain = _index_contacts(records)
+        finished = []
+        partials = []
+        found_pairs: list[tuple[dict[str, Any], str]] = []
+        for lead in batch_leads:
+            domain = str(lead.pop("_enrich_domain", ""))
+            item = contacts_by_domain.get(domain)
+            candidates = extract_phone_candidates(item) if item else []
+            if not candidates:
+                result.not_found += 1
+                finished.append(
+                    _finish(lead, phone=normalize_phone(lead.get("phone")), enrichment_status=NOT_FOUND)
+                )
+                continue
+            result.retrieved += 1
+            if verify:
+                partial = _without_private(lead)
+                partial["phone"] = candidates[0]
+                partial["updated_at"] = utc_now()
+                partials.append(partial)
+                found_pairs.append((lead, candidates[0]))
             else:
-                result.invalid += 1
-                result.updated.append(_finish(lead, phone="", enrichment_status=INVALID))
+                result.verified += 1
+                finished.append(_finish(lead, phone=candidates[0], enrichment_status=ENRICHED))
+        _persist(partials, final=False)
+        _persist(finished, final=True)
+        _verify_pairs(found_pairs, label="retrieved")
 
     _log(
         result,
@@ -411,10 +485,13 @@ def run_from_store(
             log_cb,
         )
         return result
-    result = enrich_cleaned_leads(candidates, lookup, verify=verify, log_cb=log_cb)
-    if result.updated:
-        target.save_phone_enrichment(result.updated)
-    return result
+    return enrich_cleaned_leads(
+        candidates,
+        lookup,
+        verify=verify,
+        log_cb=log_cb,
+        on_batch=target.save_phone_enrichment,
+    )
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -476,6 +553,29 @@ def _sdk_lookup() -> SdkPhoneLookup:
     return SdkPhoneLookup(OutscraperClient(os.environ["OUTSCRAPER_API_KEY"].strip()))
 
 
+def resolve_fixture_path(path: str) -> str:
+    """Resolve a fixture path from the original working directory or the repo root.
+
+    ``main.py`` changes into ``scraper/`` before commands run, so a relative
+    ``shared/tests/...`` path is not next to the process cwd.
+    """
+    if not path or os.path.isabs(path):
+        return path
+    root = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir))
+    for base in (os.getcwd(), root):
+        candidate = os.path.abspath(os.path.join(base, path))
+        if os.path.isfile(candidate):
+            return candidate
+    return os.path.abspath(os.path.join(root, path))
+
+
+def _filter_fixture_category(payload: list[Any], category: str | None) -> list[dict[str, Any]]:
+    rows = [lead for lead in payload if isinstance(lead, dict)]
+    if not category:
+        return rows
+    return [lead for lead in rows if str(lead.get("category") or "").strip() == category]
+
+
 def cli_main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     logs: list[str] = []
@@ -484,37 +584,46 @@ def cli_main(argv: list[str] | None = None) -> int:
         logs.append(message)
         print(message)
 
-    category = category_for_preset(args.preset) if args.preset else None
-    verify = not args.no_verify
-    if args.fixture:
-        with open(args.fixture, encoding="utf-8") as handle:
-            payload = json.load(handle)
-        if not isinstance(payload, list):
-            raise SystemExit("fixture must be a JSON list of lead objects")
-        if not args.execute:
-            eligible = sum(1 for lead in payload if isinstance(lead, dict) and needs_phone_enrichment(lead))
-            cost = estimate_cost(eligible, verify=verify)
-            _log(
-                f"Dry-run fixture — {eligible} lead(s), estimated ${cost['total_usd']:.2f} "
-                "per the published medium-tier rate. No Outscraper request was sent."
-            )
+    try:
+        category = category_for_preset(args.preset) if args.preset else None
+        verify = not args.no_verify
+        if args.fixture:
+            fixture_path = resolve_fixture_path(args.fixture)
+            with open(fixture_path, encoding="utf-8") as handle:
+                payload = json.load(handle)
+            if not isinstance(payload, list):
+                raise SystemExit("fixture must be a JSON list of lead objects")
+            leads = _filter_fixture_category(payload, category)
+            if not args.execute:
+                eligible = sum(1 for lead in leads if needs_phone_enrichment(lead))
+                cost = estimate_cost(eligible, verify=verify)
+                _log(
+                    f"Dry-run fixture — {eligible} lead(s), estimated ${cost['total_usd']:.2f} "
+                    "per the published medium-tier rate. No Outscraper request was sent."
+                )
+            else:
+                api_key = os.getenv("OUTSCRAPER_API_KEY", "").strip()
+                if not api_key:
+                    raise SystemExit("OUTSCRAPER_API_KEY is required for --execute")
+                enrich_cleaned_leads(leads, _sdk_lookup(), verify=verify, log_cb=_log)
         else:
-            api_key = os.getenv("OUTSCRAPER_API_KEY", "").strip()
-            if not api_key:
+            if args.execute and not os.getenv("OUTSCRAPER_API_KEY", "").strip():
                 raise SystemExit("OUTSCRAPER_API_KEY is required for --execute")
-            enrich_cleaned_leads(payload, _sdk_lookup(), verify=verify, log_cb=_log)
-    else:
-        if args.execute and not os.getenv("OUTSCRAPER_API_KEY", "").strip():
-            raise SystemExit("OUTSCRAPER_API_KEY is required for --execute")
-        lookup = _sdk_lookup() if args.execute else None
-        run_from_store(
-            execute=args.execute,
-            limit=args.limit,
-            category=category,
-            verify=verify,
-            lookup=lookup,
-            log_cb=_log,
-        )
+            lookup = _sdk_lookup() if args.execute else None
+            run_from_store(
+                execute=args.execute,
+                limit=args.limit,
+                category=category,
+                verify=verify,
+                lookup=lookup,
+                log_cb=_log,
+            )
+    except SystemExit:
+        raise
+    except Exception as exc:
+        logger.error("phone enrichment failed: %s", exc)
+        print(f"ERROR phone enrichment failed: {exc}")
+        return 1
     errors = log_has_errors(logs)
     if errors:
         logger.error("phone enrichment log contained errors: %s", errors)

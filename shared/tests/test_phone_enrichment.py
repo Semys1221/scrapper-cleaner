@@ -7,11 +7,14 @@ from pathlib import Path
 
 from shared.central_leads import STATUS_CLEANED, InMemoryLeadsStore
 from shared.phone_enrichment import (
+    ERROR,
     PhonePayloadError,
     cli_main,
     enrich_cleaned_leads,
     estimate_cost,
     log_has_errors,
+    needs_phone_enrichment,
+    resolve_fixture_path,
     run_from_store,
     validate_contacts_payload,
     validate_phones_enricher_payload,
@@ -115,11 +118,20 @@ def test_invalid_carrier_does_not_store_phone() -> None:
                 "data": [{"query": phone, "carrier_type": "invalid"} for phone in phones],
             }
 
-    result = enrich_cleaned_leads([_lead()], InvalidLookup(), verify=True)
+    lead = _lead()
+    store = InMemoryLeadsStore()
+    store.rows[lead["email"]] = dict(lead)
+    result = enrich_cleaned_leads(
+        [lead],
+        InvalidLookup(),
+        verify=True,
+        on_batch=store.save_phone_enrichment,
+    )
     assert result.invalid == 1
     assert result.updated[0]["phone"] == ""
     assert result.updated[0]["phone_enrichment_status"] == "invalid"
     assert result.updated[0]["phone_enriched_at"]
+    assert store.rows[lead["email"]]["phone"] == ""
 
 
 def test_store_execute_skips_enriched_rows() -> None:
@@ -145,6 +157,117 @@ def test_store_execute_skips_enriched_rows() -> None:
     )
     assert second.eligible == 0
     assert lookup.contact_calls == [["dupont.fr"]]
+
+
+def test_outage_leaves_existing_phone_intact_and_retryable() -> None:
+    lead = _lead(phone="+33601020304")
+    store = InMemoryLeadsStore()
+    store.rows[lead["email"]] = dict(lead)
+
+    class Down:
+        def emails_and_contacts(self, domains: list[str]) -> dict:
+            raise RuntimeError("outscraper down")
+
+        def phones_enricher(self, phones: list[str]) -> dict:
+            raise RuntimeError("outscraper down")
+
+    try:
+        enrich_cleaned_leads(
+            [lead],
+            Down(),
+            verify=True,
+            on_batch=store.save_phone_enrichment,
+        )
+    except RuntimeError as exc:
+        assert "outscraper down" in str(exc)
+    else:
+        raise AssertionError("expected the outage to raise")
+    saved = store.rows["jean@dupont.fr"]
+    assert saved["phone"] == "+33601020304"
+    assert not saved.get("phone_enriched_at")
+    assert saved["phone_enrichment_status"] == ERROR
+    assert needs_phone_enrichment(saved)
+
+
+def test_existing_phone_is_never_cleared() -> None:
+    lead = _lead(phone="+33601020304")
+
+    class InvalidLookup(FakeLookup):
+        def phones_enricher(self, phones: list[str]) -> dict:
+            return {
+                "status": "Success",
+                "data": [{"query": phone, "carrier_type": "invalid"} for phone in phones],
+            }
+
+    result = enrich_cleaned_leads([lead], InvalidLookup(), verify=True)
+    assert result.invalid == 1
+    assert result.updated[0]["phone"] == "+33601020304"
+    assert result.updated[0]["phone_enrichment_status"] == "invalid"
+
+    store = InMemoryLeadsStore()
+    store.rows[lead["email"]] = dict(lead)
+    store.save_phone_enrichment(
+        [
+            {
+                **lead,
+                "phone": "",
+                "phone_enrichment_status": "invalid",
+                "phone_enriched_at": "2026-10-06T00:00:00+00:00",
+            }
+        ]
+    )
+    assert store.rows[lead["email"]]["phone"] == "+33601020304"
+
+
+def test_paid_batch_is_persisted_before_later_outage(monkeypatch) -> None:
+    monkeypatch.setenv("OUTSCRAPER_PHONE_BATCH_SIZE", "1")
+    first = _lead(id="row-1", email="jean@dupont.fr", website="https://dupont.fr", phone="")
+    second = _lead(id="row-2", email="anne@second.fr", website="https://second.fr", phone="")
+    store = InMemoryLeadsStore()
+    store.rows[first["email"]] = dict(first)
+    store.rows[second["email"]] = dict(second)
+
+    class Flaky(FakeLookup):
+        def emails_and_contacts(self, domains: list[str]) -> dict:
+            self.contact_calls.append(list(domains))
+            if "second.fr" in domains:
+                raise RuntimeError("outscraper down")
+            return super().emails_and_contacts(domains)
+
+    try:
+        enrich_cleaned_leads(
+            [first, second],
+            Flaky(),
+            verify=True,
+            on_batch=store.save_phone_enrichment,
+        )
+    except RuntimeError as exc:
+        assert "outscraper down" in str(exc)
+    else:
+        raise AssertionError("expected the second batch to raise")
+
+    saved_first = store.rows["jean@dupont.fr"]
+    assert saved_first["phone"] == "+33184801234"
+    assert saved_first["phone_enriched_at"]
+    saved_second = store.rows["anne@second.fr"]
+    assert saved_second["phone"] == ""
+    assert not saved_second.get("phone_enriched_at")
+    assert saved_second["phone_enrichment_status"] == ERROR
+    assert needs_phone_enrichment(saved_second)
+
+
+def test_fixture_preset_filters_by_category(capsys) -> None:
+    code = cli_main(["--fixture", str(FIXTURE), "--preset", "avocats"])
+    captured = capsys.readouterr()
+    assert code == 0
+    assert "Dry-run fixture — 0 lead(s)" in captured.out
+
+
+def test_fixture_path_resolves_from_repo_root(monkeypatch, tmp_path) -> None:
+    monkeypatch.chdir(tmp_path)
+    resolved = resolve_fixture_path("shared/tests/fixtures/cleaned_leads.json")
+    assert resolved.endswith("shared/tests/fixtures/cleaned_leads.json")
+    assert cli_main(["--fixture", "shared/tests/fixtures/cleaned_leads.json", "--preset", "plombier"]) == 0
 
 
 def test_fixture_dry_run_prints_cost_without_errors(capsys) -> None:

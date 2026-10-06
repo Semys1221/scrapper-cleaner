@@ -1275,6 +1275,7 @@ async def push_leads_to_list(
     skip_if_in_campaign: bool = True,
     skip_if_in_list: bool = True,
     log_cb: Callable[[str], None] | None = None,
+    cleaned: bool = False,
 ) -> dict[str, int]:
     """Upload leads to a list; Instantly skips duplicates via skip_if_in_* flags."""
     if not api_key or not list_id or not leads:
@@ -1284,6 +1285,9 @@ async def push_leads_to_list(
             "skipped_duplicate": 0,
             "failed": 0,
         }
+    from shared.central_leads import refuse_uncleaned_instantly_push
+
+    refuse_uncleaned_instantly_push(cleaned=cleaned)
 
     to_upload: list[dict[str, Any]] = []
     for row in leads:

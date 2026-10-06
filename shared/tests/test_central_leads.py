@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
-import re
+from pathlib import Path
 
 from shared.central_leads import (
+    LEADS_CONFLICT_TARGET,
+    LEADS_UPSERT_RPC,
     STATUS_CLEANED,
     STATUS_IN_CAMPAIGN,
     STATUS_UNCLEANED,
@@ -159,92 +161,38 @@ def test_duplicate_email_keeps_category_and_fills_empty_fields() -> None:
     assert row["status"] == STATUS_CLEANED
 
 
-class _Result:
-    def __init__(self, data: list) -> None:
+class _RpcResult:
+    def __init__(self, data: dict) -> None:
         self.data = data
 
 
-class _Query:
-    def __init__(self, client: "_Client", op: str, payload: object = None) -> None:
-        self.client = client
-        self.op = op
-        self.payload = payload
-        self._or = ""
-        self._eq: dict[str, object] = {}
+class _RpcClient:
+    def __init__(self, data: dict | None = None) -> None:
+        self.calls: list[tuple[str, dict]] = []
+        self._data = data or {"inserted": 0, "updated": 2}
 
-    def select(self, *_args: object, **_kwargs: object) -> "_Query":
-        self.op = "select"
+    def rpc(self, name: str, params: dict) -> "_RpcClient":
+        self.calls.append((name, params))
         return self
 
-    def insert(self, rows: list) -> "_Query":
-        self.op = "insert"
-        self.payload = rows
-        return self
-
-    def update(self, patch: dict) -> "_Query":
-        self.op = "update"
-        self.payload = patch
-        return self
-
-    def or_(self, clauses: str) -> "_Query":
-        self._or = clauses
-        return self
-
-    def eq(self, key: str, value: object) -> "_Query":
-        self._eq[key] = value
-        return self
-
-    def execute(self) -> _Result:
-        if self.op == "select":
-            wanted = {
-                email.lower()
-                for email in re.findall(r'email\.ilike\."((?:[^"]|"")*)"', self._or)
-            }
-            return _Result(
-                [row for row in self.client.rows if str(row["email"]).strip().lower() in wanted]
-            )
-        if self.op == "insert":
-            assert isinstance(self.payload, list)
-            for row in self.payload:
-                stored = dict(row)
-                stored.setdefault("id", f"sb-{len(self.client.rows) + 1}")
-                self.client.rows.append(stored)
-            return _Result(list(self.payload))
-        if self.op == "update":
-            assert isinstance(self.payload, dict)
-            matched = [
-                row for row in self.client.rows if row.get("id") == self._eq.get("id")
-            ]
-            for row in matched:
-                row.update(self.payload)
-            return _Result(matched)
-        raise AssertionError(self.op)
+    def execute(self) -> _RpcResult:
+        return _RpcResult(self._data)
 
 
-class _Client:
-    def __init__(self) -> None:
-        self.rows: list[dict] = []
+def test_upsert_sql_keeps_status_and_fills_empty_fields() -> None:
+    sql_path = Path(__file__).resolve().parents[2] / "migrations" / "proposed" / "20261006_leads_upsert_uncleaned.sql"
+    sql = sql_path.read_text(encoding="utf-8")
+    assert "DO NOT APPLY" in sql
+    assert "ON CONFLICT %2$s DO UPDATE SET" in sql
+    assert "EXCLUDED.status" not in sql
+    assert "WHEN %1$I.category IS NULL OR btrim(%1$I.category) = ''" in sql
+    for column in ("first_name", "last_name", "company", "website", "phone"):
+        assert f"NULLIF(btrim(%1$I.{column}), '')" in sql
+    assert LEADS_CONFLICT_TARGET == "((lower(trim(email))))"
 
-    def table(self, name: str) -> _Query:
-        assert name == "leads"
-        return _Query(self, "pending")
 
-
-def test_supabase_upsert_collapses_duplicate_normalized_email() -> None:
-    client = _Client()
-    client.rows.append(
-        {
-            "id": "existing",
-            "email": "Jean@Dupont.fr",
-            "first_name": "",
-            "last_name": "Dupont",
-            "company": "Dupont",
-            "website": "dupont.fr",
-            "phone": "",
-            "category": "PLOMBIER",
-            "status": STATUS_IN_CAMPAIGN,
-        }
-    )
+def test_supabase_upsert_is_one_conflict_call() -> None:
+    client = _RpcClient()
     store = SupabaseLeadsStore(client, "leads")
     incoming = scraped_row_to_lead(
         {
@@ -261,17 +209,71 @@ def test_supabase_upsert_collapses_duplicate_normalized_email() -> None:
         {"Email": "JEAN@DUPONT.FR", "Company": "Third", "Phone": "0699999999"},
         preset="notaires",
     )
-    stats = store.upsert_uncleaned([incoming, same_batch])
-    assert stats == {"inserted": 0, "updated": 1, "skipped": 1}
-    assert len(client.rows) == 1
-    row = client.rows[0]
-    assert row["status"] == STATUS_IN_CAMPAIGN
-    assert row["category"] == "PLOMBIER"
-    assert row["company"] == "Dupont"
-    assert row["website"] == "dupont.fr"
-    assert row["last_name"] == "Dupont"
-    assert row["first_name"] == "Jean"
-    assert row["phone"] == "0612345678"
+    wildcard = scraped_row_to_lead(
+        {"Email": " A_B%@ex.fr ", "Company": "Wild"},
+        preset="plombier",
+    )
+    stats = store.upsert_uncleaned([incoming, same_batch, wildcard, {"email": "not-an-email"}])
+    assert stats["skipped"] == 1
+    assert len(client.calls) == 1
+    name, params = client.calls[0]
+    assert name == LEADS_UPSERT_RPC
+    assert params["p_conflict_target"] == LEADS_CONFLICT_TARGET
+    assert params["p_table"] == "leads"
+    emails = [row["email"] for row in params["p_rows"]]
+    assert emails == ["jean@dupont.fr", "a_b%@ex.fr"]
+    first = params["p_rows"][0]
+    assert first["category"] == "AVOCAT"
+    assert first["company"] == "Other"
+    assert first["phone"] == "0612345678"
+    assert first["last_name"] == "Martin"
+    assert "ilike" not in str(params)
+
+
+class _ExactQuery:
+    def __init__(self) -> None:
+        self.filters: list[tuple[str, object]] = []
+
+    def update(self, patch: dict) -> "_ExactQuery":
+        self.patch = patch
+        return self
+
+    def in_(self, key: str, values: list) -> "_ExactQuery":
+        self.filters.append((key, list(values)))
+        return self
+
+    def eq(self, key: str, value: object) -> "_ExactQuery":
+        self.filters.append((key, value))
+        return self
+
+    def execute(self) -> _RpcResult:
+        return _RpcResult({"unused": True})
+
+    def __getattr__(self, name: str):
+        raise AssertionError(f"unexpected query method {name}")
+
+
+class _ExactClient:
+    def __init__(self) -> None:
+        self.query = _ExactQuery()
+
+    def table(self, name: str) -> _ExactQuery:
+        assert name == "leads"
+        return self.query
+
+
+def test_mark_cleaned_uses_exact_normalized_email() -> None:
+    client = _ExactClient()
+    store = SupabaseLeadsStore(client, "leads")
+
+    def execute() -> object:
+        return type("R", (), {"data": [{"id": "1"}, {"id": "2"}]})()
+
+    client.query.execute = execute  # type: ignore[method-assign]
+    stats = store.mark_cleaned([" Jean@Dupont.fr ", "not-an-email", "a_b%@ex.fr"])
+    assert stats == {"updated": 2}
+    assert client.query.filters[0] == ("email", ["a_b%@ex.fr", "jean@dupont.fr"])
+    assert ("status", STATUS_UNCLEANED) in client.query.filters
 
 
 def test_instantly_custom_variables_drop_registry_fields() -> None:

@@ -32,6 +32,16 @@ def get_api_key() -> str:
     return os.getenv("INSTANTLY_API_KEY", "").strip()
 
 
+def _instantly_custom_value(value: Any) -> Any | None:
+    """Keep scalar custom-variable values. Instantly rejects objects and arrays."""
+    if isinstance(value, bool) or isinstance(value, (int, float)):
+        return value
+    if isinstance(value, str):
+        text = value.strip()
+        return text or None
+    return None
+
+
 class InstantlyClient:
     def __init__(self, api_key: str) -> None:
         self.api_key = api_key
@@ -346,7 +356,7 @@ class InstantlyClient:
     def patch_lead_custom_variables(
         self,
         lead_id: str,
-        custom_variables: dict[str, str],
+        custom_variables: dict[str, Any],
     ) -> None:
         self._fetch(
             f"/leads/{lead_id.strip()}",
@@ -354,17 +364,42 @@ class InstantlyClient:
             body={"custom_variables": custom_variables},
         )
 
+    def merge_lead_custom_variables(
+        self,
+        lead_id: str,
+        updates: dict[str, Any],
+    ) -> dict[str, Any]:
+        """PATCH custom_variables without wiping keys already stored on the lead.
+
+        Instantly's PATCH /api/v2/leads/{id} replaces the whole custom_variables
+        object (it is not a key merge). Read the lead first, overlay the update,
+        and send the combined map so values such as city and siret stay.
+        """
+        lead = self.get_lead(lead_id)
+        merged: dict[str, Any] = {}
+        for source in (lead.get("payload"), lead.get("custom_variables")):
+            if not isinstance(source, dict):
+                continue
+            for key, value in source.items():
+                coerced = _instantly_custom_value(value)
+                if coerced is None:
+                    continue
+                merged[str(key)] = coerced
+        for key, value in updates.items():
+            coerced = _instantly_custom_value(value)
+            if coerced is None:
+                continue
+            merged[str(key)] = coerced
+        self.patch_lead_custom_variables(lead_id, merged)
+        return merged
+
     def replace_lead_custom_variables(
         self,
         lead_id: str,
         custom_variables: dict[str, str],
     ) -> None:
-        """Replace Instantly custom_variables with the canonical set only.
-
-        Instantly PATCH overwrites the whole map, which drops legacy keys
-        such as `link` and `confirm_link`.
-        """
-        self.patch_lead_custom_variables(lead_id, custom_variables)
+        """Backward-compatible name. Merges into the lead instead of wiping it."""
+        self.merge_lead_custom_variables(lead_id, custom_variables)
 
     def patch_leads_custom_variables_parallel(
         self,
@@ -392,7 +427,7 @@ class InstantlyClient:
         def _patch_one(item: tuple[str, dict[str, str]]) -> None:
             lead_id, custom_variables = item
             worker = InstantlyClient(api_key)
-            worker.replace_lead_custom_variables(lead_id, custom_variables)
+            worker.merge_lead_custom_variables(lead_id, custom_variables)
 
         with ThreadPoolExecutor(max_workers=workers) as pool:
             futures = {pool.submit(_patch_one, item): item for item in items}
@@ -418,9 +453,13 @@ class InstantlyClient:
         *,
         campaign_id: str,
         leads: list[dict[str, Any]],
+        cleaned: bool = False,
     ) -> dict[str, int]:
         if not leads:
             return {"pushed": 0, "skipped_duplicate": 0, "failed": 0}
+        from shared.central_leads import refuse_uncleaned_instantly_push
+
+        refuse_uncleaned_instantly_push(cleaned=cleaned)
 
         data = self._fetch(
             "/leads/add",
@@ -449,9 +488,10 @@ class InstantlyClient:
         *,
         campaign_id: str,
         leads: list[dict[str, Any]],
+        cleaned: bool = False,
     ) -> dict[str, int]:
         """CRM-compatible batch push (list of lead dicts)."""
-        return self.push_leads_batch(campaign_id=campaign_id, leads=leads)
+        return self.push_leads_batch(campaign_id=campaign_id, leads=leads, cleaned=cleaned)
 
     def fetch_unibox_replies(self, *, max_items: int = 200) -> list[dict[str, Any]]:
         items: list[dict[str, Any]] = []
@@ -1162,6 +1202,10 @@ def push_leads_to_campaign(
     }
     if dry_run or rows.empty:
         return empty_stats
+
+    from shared.central_leads import refuse_uncleaned_instantly_push
+
+    refuse_uncleaned_instantly_push(cleaned=True)
 
     client = _get_client()
     attempted = len(rows)

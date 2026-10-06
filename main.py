@@ -7,6 +7,7 @@ import sys
 
 _REPO_ROOT = os.path.dirname(os.path.abspath(__file__))
 _SCRAPER_DIR = os.path.join(_REPO_ROOT, "scraper")
+_ORIGINAL_CWD = os.getcwd()
 for _path in (_SCRAPER_DIR, _REPO_ROOT):
     if _path not in sys.path:
         sys.path.insert(0, _path)
@@ -38,6 +39,17 @@ from core_logic import (
 from scrape_state import detect_recoverable_run, load_scrape_state, target_mode, target_progress_value
 
 app = typer.Typer(help="Streamlit Scraper CLI")
+
+
+def _resolve_cli_path(path: str) -> str:
+    """Resolve a user path against the cwd from before chdir(scraper/) and the repo root."""
+    if not path or os.path.isabs(path):
+        return path
+    for base in (_ORIGINAL_CWD, _REPO_ROOT):
+        candidate = os.path.normpath(os.path.join(base, path))
+        if os.path.isfile(candidate):
+            return candidate
+    return os.path.normpath(os.path.join(_REPO_ROOT, path))
 
 from bootstrap.cli import app as bootstrap_app  # noqa: E402
 
@@ -883,7 +895,7 @@ def enrich_phones_cmd(
     if preset:
         argv.extend(["--preset", preset])
     if fixture:
-        argv.extend(["--fixture", fixture])
+        argv.extend(["--fixture", _resolve_cli_path(fixture)])
     if not verify:
         argv.append("--no-verify")
     raise typer.Exit(cli_main(argv))

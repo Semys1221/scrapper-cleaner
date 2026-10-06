@@ -108,3 +108,40 @@ def test_dry_run_log_has_no_errors(tmp_path: Path, monkeypatch: pytest.MonkeyPat
         text += "\n" + log_path.read_text(encoding="utf-8")
     _assert_clean(text)
     assert "zero Outscraper requests made" in text
+
+
+def test_central_lead_write_failure_is_not_swallowed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("HERCULE_DATA_ROOT", str(tmp_path))
+    activate_output_paths("plombier")
+
+    def boom(_row: dict, *, preset: str) -> dict:
+        raise RuntimeError(f"schema mismatch for {preset}")
+
+    monkeypatch.setattr("shared.central_leads.persist_scraped_lead", boom)
+    from core_logic import _append_lead_row
+
+    with pytest.raises(RuntimeError, match="schema mismatch"):
+        _append_lead_row({"Email": "a@ex.fr", "Company": "A"})
+
+
+def test_taxonomy_push_refuses_uncleaned_leads(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("HERCULE_ALLOW_UNCLEANED_INSTANTLY_PUSH", raising=False)
+    csv_path = tmp_path / "leads.csv"
+    csv_path.write_text("Email,Company\na@ex.fr,Dupont\n", encoding="utf-8")
+    from core_logic import backfill_taxonomy_push
+    from shared.central_leads import InstantlyUncleanedPushError
+
+    with pytest.raises(InstantlyUncleanedPushError):
+        asyncio.run(
+            backfill_taxonomy_push(
+                {
+                    "INSTANTLY_API_KEY": "test-key",
+                    "INSTANTLY_LIST_ID": "list-1",
+                    "TAXONOMY_GATE_ENABLED": False,
+                },
+                csv_path=str(csv_path),
+                state_path=str(tmp_path / "state.json"),
+                log_cb=lambda _message: None,
+                dry_run=False,
+            )
+        )

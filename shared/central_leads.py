@@ -12,13 +12,23 @@ create another row and does not change status or a category that is already set.
 
 from __future__ import annotations
 
+import logging
 import os
 import re
 import unicodedata
 from datetime import datetime, timezone
 from typing import Any, Iterable, Protocol
 
+logger = logging.getLogger(__name__)
+
 LEADS_TABLE = "leads"
+
+# Single conflict target. hercule.dev PR 192 is still rewriting 026_leads.sql
+# (the previous head used UNIQUE(email, category_key)). Change only this string
+# when the final unique key lands. Expression indexes need both parenthesis pairs:
+# ON CONFLICT ((lower(trim(email)))).
+LEADS_CONFLICT_TARGET = "((lower(trim(email))))"
+LEADS_UPSERT_RPC = "leads_upsert_uncleaned"
 
 STATUS_UNCLEANED = "uncleaned"
 STATUS_CLEANED = "cleaned"
@@ -85,10 +95,24 @@ PRESET_CATEGORY: dict[str, str] = {
 _FILL_IF_EMPTY = ("first_name", "last_name", "company", "website", "phone")
 
 
+class InstantlyUncleanedPushError(RuntimeError):
+    """An Instantly upload was attempted for leads that are not cleaned."""
+
+
 def uncleaned_instantly_push_allowed() -> bool:
     """Uncleaned leads stay in Supabase unless this legacy escape hatch is on."""
     raw = os.getenv("HERCULE_ALLOW_UNCLEANED_INSTANTLY_PUSH", "")
     return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def refuse_uncleaned_instantly_push(*, cleaned: bool = False) -> None:
+    """Every Instantly upload calls this. Cleaned pushes pass; uncleaned ones raise."""
+    if cleaned or uncleaned_instantly_push_allowed():
+        return
+    raise InstantlyUncleanedPushError(
+        "Refusing to push uncleaned leads to Instantly. "
+        "Clean them first (status=cleaned), or set HERCULE_ALLOW_UNCLEANED_INSTANTLY_PUSH=1."
+    )
 
 
 def leads_table_name() -> str:
@@ -222,6 +246,46 @@ def merge_uncleaned(existing: dict[str, Any], incoming: dict[str, Any]) -> dict[
     return patch
 
 
+def _collapse_leads_by_email(
+    leads: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], int]:
+    """One row per normalized email so ON CONFLICT does not see the same row twice."""
+    skipped = 0
+    pending: dict[str, dict[str, Any]] = {}
+    order: list[str] = []
+    for lead in leads:
+        email = normalize_email(lead.get("email"))
+        if "@" not in email:
+            skipped += 1
+            continue
+        stored = {key: value for key, value in lead.items() if key != "id"}
+        stored["email"] = email
+        current = pending.get(email)
+        if current is None:
+            pending[email] = stored
+            order.append(email)
+            continue
+        patch = merge_uncleaned(current, stored)
+        if patch:
+            current.update(patch)
+    return [pending[email] for email in order], skipped
+
+
+def probe_leads_table(store: LeadsStore | None = None) -> None:
+    """Fail at startup when Supabase is configured but the leads table is missing.
+
+    Per-row writes still raise on their own. This only runs when credentials exist.
+    """
+    target = store if store is not None else supabase_store_from_env()
+    if not isinstance(target, SupabaseLeadsStore):
+        return
+    try:
+        target.client.table(target.table).select("email").limit(1).execute()
+    except Exception as exc:
+        logger.error("Central leads table %s is not readable: %s", target.table, exc)
+        raise
+
+
 def core_instantly_custom_variables(
     existing: dict[str, Any] | None = None,
     *,
@@ -332,14 +396,19 @@ class InMemoryLeadsStore:
             existing = self.rows.get(email)
             if existing is None:
                 continue
-            for field in (
-                "phone",
-                "phone_enriched_at",
-                "phone_enrichment_status",
-                "updated_at",
-            ):
-                if field in lead:
-                    existing[field] = lead[field]
+            new_phone = normalize_phone(lead.get("phone"))
+            if lead.get("clear_unverified_phone"):
+                existing["phone"] = ""
+            elif new_phone:
+                existing["phone"] = new_phone
+            status = lead.get("phone_enrichment_status")
+            if status:
+                existing["phone_enrichment_status"] = status
+            enriched_at = lead.get("phone_enriched_at")
+            if enriched_at:
+                existing["phone_enriched_at"] = enriched_at
+            if lead.get("updated_at"):
+                existing["updated_at"] = lead["updated_at"]
             updated += 1
         return {"updated": updated}
 
@@ -350,67 +419,51 @@ class SupabaseLeadsStore:
         self.table = table
 
     def upsert_uncleaned(self, leads: list[dict[str, Any]]) -> dict[str, int]:
-        inserted = 0
-        updated = 0
-        skipped = 0
-        prepared: list[dict[str, Any]] = []
-        for lead in leads:
-            email = normalize_email(lead.get("email"))
-            if "@" not in email:
-                skipped += 1
-                continue
-            prepared.append({**lead, "email": email})
-        emails = sorted({lead["email"] for lead in prepared})
-        existing_rows = self._select_emails(emails)
-        by_email = {normalize_email(row.get("email")): row for row in existing_rows}
-        pending_insert: dict[str, dict[str, Any]] = {}
-        for lead in prepared:
-            email = lead["email"]
-            existing = by_email.get(email)
-            if existing is None and email in pending_insert:
-                patch = merge_uncleaned(pending_insert[email], lead)
-                if patch:
-                    pending_insert[email].update(patch)
-                continue
-            if existing is None:
-                pending_insert[email] = {k: v for k, v in lead.items() if k != "id"}
-                continue
-            patch = merge_uncleaned(existing, lead)
-            if not patch:
-                skipped += 1
-                continue
-            (
-                self.client.table(self.table)
-                .update(patch)
-                .eq("id", existing["id"])
-                .execute()
-            )
-            existing.update(patch)
-            updated += 1
-        if pending_insert:
-            self.client.table(self.table).insert(list(pending_insert.values())).execute()
-            inserted += len(pending_insert)
+        """One INSERT ... ON CONFLICT via leads_upsert_uncleaned. No read-then-write."""
+        collapsed, skipped = _collapse_leads_by_email(leads)
+        if not collapsed:
+            return {"inserted": 0, "updated": 0, "skipped": skipped}
+        response = self.client.rpc(
+            LEADS_UPSERT_RPC,
+            {
+                "p_rows": collapsed,
+                "p_conflict_target": LEADS_CONFLICT_TARGET,
+                "p_table": self.table,
+            },
+        ).execute()
+        data = response.data
+        if isinstance(data, list):
+            data = data[0] if data else {}
+        if not isinstance(data, dict):
+            raise RuntimeError(f"{LEADS_UPSERT_RPC} returned {data!r}")
+        inserted = int(data.get("inserted") or 0)
+        updated = int(data.get("updated") or 0)
+        skipped += max(len(collapsed) - inserted - updated, 0)
         return {"inserted": inserted, "updated": updated, "skipped": skipped}
 
     def mark_cleaned(self, emails: Iterable[str]) -> dict[str, int]:
-        wanted = {normalize_email(email) for email in emails if "@" in normalize_email(email)}
+        wanted = sorted(
+            {normalize_email(email) for email in emails if "@" in normalize_email(email)}
+        )
         if not wanted:
             return {"updated": 0}
         now = utc_now()
-        patch = {
-            "status": STATUS_CLEANED,
-            "cleaned_at": now,
-            "updated_at": now,
-        }
-        updated = 0
-        for row in self._select_emails(sorted(wanted)):
-            if normalize_email(row.get("email")) not in wanted:
-                continue
-            if row.get("status") != STATUS_UNCLEANED or not row.get("id"):
-                continue
-            self.client.table(self.table).update(patch).eq("id", row["id"]).execute()
-            updated += 1
-        return {"updated": updated}
+        # Exact equality on the normalized email. ilike would treat _ and % as wildcards.
+        response = (
+            self.client.table(self.table)
+            .update(
+                {
+                    "status": STATUS_CLEANED,
+                    "cleaned_at": now,
+                    "updated_at": now,
+                }
+            )
+            .in_("email", wanted)
+            .eq("status", STATUS_UNCLEANED)
+            .execute()
+        )
+        data = response.data or []
+        return {"updated": len(data) if isinstance(data, list) else 0}
 
     def list_phone_candidates(
         self, *, limit: int, category: str | None = None
@@ -434,27 +487,23 @@ class SupabaseLeadsStore:
             lead_id = lead.get("id")
             if not lead_id:
                 continue
-            patch = {
-                "phone": lead.get("phone") or "",
-                "phone_enriched_at": lead.get("phone_enriched_at"),
-                "phone_enrichment_status": lead.get("phone_enrichment_status"),
+            patch: dict[str, Any] = {
                 "updated_at": lead.get("updated_at") or utc_now(),
             }
+            new_phone = normalize_phone(lead.get("phone"))
+            if lead.get("clear_unverified_phone"):
+                patch["phone"] = ""
+            elif new_phone:
+                patch["phone"] = new_phone
+            status = lead.get("phone_enrichment_status")
+            if status:
+                patch["phone_enrichment_status"] = status
+            enriched_at = lead.get("phone_enriched_at")
+            if enriched_at:
+                patch["phone_enriched_at"] = enriched_at
             self.client.table(self.table).update(patch).eq("id", lead_id).execute()
             updated += 1
         return {"updated": updated}
-
-    def _select_emails(self, emails: list[str]) -> list[dict[str, Any]]:
-        if not emails:
-            return []
-        # Case-insensitive match so a row stored as Jean@x.fr collides with jean@x.fr.
-        # The table unique key is lower(trim(email)) (hercule.dev 026_leads.sql).
-        clauses = ",".join(
-            'email.ilike."' + email.replace('"', '""') + '"' for email in emails
-        )
-        response = self.client.table(self.table).select("*").or_(clauses).execute()
-        data = response.data or []
-        return [row for row in data if isinstance(row, dict)]
 
 
 def supabase_store_from_env() -> SupabaseLeadsStore | None:
