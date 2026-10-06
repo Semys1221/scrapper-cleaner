@@ -128,6 +128,15 @@ class QueryPlanner:
     slot_skips: dict[str, int] = field(default_factory=dict)
     exhausted_slots: set[int] = field(default_factory=set)
     batch_seq: int = 0
+    # slot_id -> skip issued and not yet recorded. Not persisted: a crash
+    # or a failed batch leaves the cursor where it was so resume re-fetches.
+    inflight: dict[int, int] = field(default_factory=dict)
+    # (slot_id, issued skip) already applied. A duplicate result must not
+    # advance the cursor a second time.
+    recorded: set[tuple[int, int]] = field(default_factory=set)
+    # Slots that failed in this process. Skipped until the next process so
+    # the fill loop does not reissue them immediately. Not persisted.
+    failed_this_run: set[int] = field(default_factory=set)
 
     def __post_init__(self) -> None:
         if not self.slots:
@@ -155,11 +164,18 @@ class QueryPlanner:
     def active_slots(self) -> list[PlannerSlot]:
         return [s for s in self.slots if s.slot_id not in self.exhausted_slots]
 
+    def _issuable_slots(self) -> list[PlannerSlot]:
+        return [
+            slot
+            for slot in self.active_slots()
+            if slot.slot_id not in self.inflight and slot.slot_id not in self.failed_this_run
+        ]
+
     def next_batch(self, batch_size: int) -> SearchBatch | None:
         if self.exhausted():
             return None
         size = min(max(int(batch_size), 1), MAX_QUERIES_PER_REQUEST)
-        active = self.active_slots()
+        active = self._issuable_slots()
         if not active:
             return None
 
@@ -181,6 +197,8 @@ class QueryPlanner:
             slot_ids.append(slot.slot_id)
         if not queries:
             return None
+        for slot_id in slot_ids:
+            self.inflight[slot_id] = min_skip
         batch = SearchBatch(
             batch_index=self.batch_seq,
             queries=queries,
@@ -190,6 +208,30 @@ class QueryPlanner:
         self.batch_seq += 1
         return batch
 
+    def release_batch(self, batch: SearchBatch) -> None:
+        """Drop an in-flight reservation without moving the cursor.
+
+        The next ``next_batch`` (or a later process, since reservations are
+        not persisted) issues the same ``(query, skip)`` again.
+        """
+        issued = int(batch.skip_places)
+        for slot_id in batch.slot_ids:
+            if self.inflight.get(slot_id) == issued:
+                self.inflight.pop(slot_id, None)
+
+    def abandon_batch(self, batch: SearchBatch) -> None:
+        """Release a failed batch and skip it for the rest of this process.
+
+        The cursor stays put. A new planner on resume does not see
+        ``failed_this_run``, so it re-fetches the page. Holding the slot
+        here stops the fill loop from issuing it again in a tight loop.
+        """
+        self.release_batch(batch)
+        for slot_id in batch.slot_ids:
+            if (int(slot_id), int(batch.skip_places)) in self.recorded:
+                continue
+            self.failed_this_run.add(int(slot_id))
+
     def record_batch_result(
         self,
         batch: SearchBatch,
@@ -198,10 +240,22 @@ class QueryPlanner:
         limit_per_query: int,
     ) -> None:
         limit = max(int(limit_per_query), 1)
-        for slot_id, raw in zip(batch.slot_ids, raw_places_per_query, strict=False):
+        issued = int(batch.skip_places)
+        for index, slot_id in enumerate(batch.slot_ids):
+            if self.inflight.get(slot_id) == issued:
+                self.inflight.pop(slot_id, None)
+            if index >= len(raw_places_per_query):
+                continue
+            raw = raw_places_per_query[index]
+            key = (int(slot_id), issued)
+            if key in self.recorded:
+                continue
+            self.recorded.add(key)
+            self.failed_this_run.discard(int(slot_id))
             if raw >= limit:
-                key = str(slot_id)
-                self.slot_skips[key] = int(self.slot_skips.get(key, 0)) + limit
+                skip_key = str(slot_id)
+                current = int(self.slot_skips.get(skip_key, 0))
+                self.slot_skips[skip_key] = max(current, issued + limit)
             else:
                 self.exhausted_slots.add(slot_id)
 

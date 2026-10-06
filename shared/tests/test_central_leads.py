@@ -400,12 +400,20 @@ class _ProbeQuery:
 
 
 class _ProbeClient:
-    def __init__(self, *, rpc_error: Exception | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        rpc_error: Exception | None = None,
+        table_error: Exception | None = None,
+    ) -> None:
         self.rpc_error = rpc_error
+        self.table_error = table_error
         self.rpc_calls: list[tuple[str, dict]] = []
 
     def table(self, name: str) -> _ProbeQuery:
         assert name == "leads"
+        if self.table_error is not None:
+            raise self.table_error
         return _ProbeQuery()
 
     def rpc(self, name: str, params: dict) -> "_ProbeClient":
@@ -455,6 +463,45 @@ def test_probe_requires_upsert_rpc() -> None:
         probe_leads_table(
             SupabaseLeadsStore(_ProbeClient(rpc_error=ConnectionError("connection timed out")), "leads")
         )
+
+    missing_table = _ProbeClient(
+        table_error=RuntimeError('relation "public.leads" does not exist (42P01)')
+    )
+    with pytest.raises(RuntimeError, match="apply 026 first") as missing_table_exc:
+        probe_leads_table(SupabaseLeadsStore(missing_table, "leads"))
+    assert "027b" not in str(missing_table_exc.value)
+
+    schema_cache = _ProbeClient(
+        table_error=RuntimeError("Could not find the table 'public.leads' in the schema cache (PGRST205)")
+    )
+    with pytest.raises(RuntimeError, match="apply 026 first") as schema_cache_exc:
+        probe_leads_table(SupabaseLeadsStore(schema_cache, "leads"))
+    assert "027b" not in str(schema_cache_exc.value)
+
+    for auth_error in (RuntimeError("PGRST301"), RuntimeError("JWSError: malformed JWT")):
+        with pytest.raises(RuntimeError, match="authentication failed") as auth_exc:
+            probe_leads_table(SupabaseLeadsStore(_ProbeClient(rpc_error=auth_error), "leads"))
+        assert "027b" not in str(auth_exc.value)
+        assert "apply 026 first" not in str(auth_exc.value)
+
+
+def test_postgres_data_errors_are_permanent() -> None:
+    from postgrest.exceptions import APIError
+
+    from shared.central_leads import is_permanent_data_error, postgres_sqlstate
+
+    too_long = APIError({"message": "value too long", "code": "22001"})
+    untranslatable = APIError({"message": "unsupported unicode escape", "code": "22P05"})
+    check = APIError({"message": "new row violates check constraint", "code": "23514"})
+    unique = APIError({"message": "duplicate key", "code": "23505"})
+    assert postgres_sqlstate(too_long) == "22001"
+    assert postgres_sqlstate(untranslatable) == "22P05"
+    assert is_permanent_data_error(too_long)
+    assert is_permanent_data_error(untranslatable)
+    assert is_permanent_data_error(check)
+    assert is_permanent_data_error(RuntimeError("ERROR: value too long (SQLSTATE 22001)"))
+    assert not is_permanent_data_error(unique)
+    assert not is_permanent_data_error(RuntimeError("schema mismatch"))
 
 
 def test_supabase_client_is_reused(monkeypatch) -> None:

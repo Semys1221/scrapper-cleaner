@@ -308,6 +308,98 @@ def test_permanent_reject_does_not_block_the_next_startup(
     assert seen == ["ok@ex.fr"]
 
 
+def test_postgres_data_errors_move_to_rejected_sidecar(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from postgrest.exceptions import APIError
+
+    monkeypatch.setenv("HERCULE_DATA_ROOT", str(tmp_path))
+    from core_logic import (
+        LeadPersistenceError,
+        _rejected_sidecar_path,
+        _reset_lead_save_buffer,
+        _retry_unpersisted_leads,
+        _sidecar_path,
+        activate_output_paths,
+    )
+
+    activate_output_paths("plombier")
+    _reset_lead_save_buffer()
+    sidecar = Path(_sidecar_path())
+    sidecar.parent.mkdir(parents=True, exist_ok=True)
+    sidecar.write_text(
+        "\n".join(
+            [
+                '{"Email": "ok-a@ex.fr", "Company": "A"}',
+                '{"Email": "bad@ex.fr", "Company": "Bad"}',
+                '{"Email": "ok-b@ex.fr", "Company": "B"}',
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    saved: list[str] = []
+    attempts = {"n": 0}
+
+    def persist(rows: list, *, preset: str) -> dict:
+        attempts["n"] += 1
+        emails = [str(row.get("Email") or "") for row in rows]
+        if "bad@ex.fr" in emails:
+            raise APIError({"message": "value too long for type character varying(320)", "code": "22001"})
+        saved.extend(emails)
+        return {"inserted": len(rows), "updated": 0, "skipped": 0}
+
+    monkeypatch.setattr("shared.central_leads.persist_scraped_leads", persist)
+    assert asyncio.run(_retry_unpersisted_leads()) is None
+    assert set(saved) == {"ok-a@ex.fr", "ok-b@ex.fr"}
+    assert "bad@ex.fr" not in saved
+    assert not sidecar.exists()
+    rejected = Path(_rejected_sidecar_path()).read_text(encoding="utf-8")
+    assert "bad@ex.fr" in rejected
+    assert "22001" in rejected
+    calls_after_save = attempts["n"]
+    _reset_lead_save_buffer()
+    assert asyncio.run(_retry_unpersisted_leads()) is None
+    assert attempts["n"] == calls_after_save
+
+    _reset_lead_save_buffer()
+    sidecar.write_text('{"Email": "wide@ex.fr", "Company": "Wide"}\n', encoding="utf-8")
+
+    def persist_check(rows: list, *, preset: str) -> dict:
+        raise APIError({"message": "new row violates check constraint leads_category_check", "code": "23514"})
+
+    monkeypatch.setattr("shared.central_leads.persist_scraped_leads", persist_check)
+    assert asyncio.run(_retry_unpersisted_leads()) is None
+    rejected = Path(_rejected_sidecar_path()).read_text(encoding="utf-8")
+    assert "wide@ex.fr" in rejected
+    assert "23514" in rejected
+    assert not sidecar.exists()
+
+    _reset_lead_save_buffer()
+    sidecar.write_text('{"Email": "unicode@ex.fr", "Company": "Unicode"}\n', encoding="utf-8")
+
+    def persist_unicode(rows: list, *, preset: str) -> dict:
+        raise RuntimeError("unsupported Unicode escape sequence (SQLSTATE 22P05)")
+
+    monkeypatch.setattr("shared.central_leads.persist_scraped_leads", persist_unicode)
+    assert asyncio.run(_retry_unpersisted_leads()) is None
+    rejected = Path(_rejected_sidecar_path()).read_text(encoding="utf-8")
+    assert "unicode@ex.fr" in rejected
+    assert "22P05" in rejected
+    assert not sidecar.exists()
+
+    _reset_lead_save_buffer()
+    sidecar.write_text('{"Email": "later@ex.fr", "Company": "Later"}\n', encoding="utf-8")
+
+    def persist_transient(rows: list, *, preset: str) -> dict:
+        raise APIError({"message": "duplicate key value violates unique constraint", "code": "23505"})
+
+    monkeypatch.setattr("shared.central_leads.persist_scraped_leads", persist_transient)
+    with pytest.raises(LeadPersistenceError):
+        asyncio.run(_retry_unpersisted_leads())
+    assert "later@ex.fr" in sidecar.read_text(encoding="utf-8")
+
+
 def test_load_config_rejects_an_unmapped_preset(monkeypatch: pytest.MonkeyPatch) -> None:
     from config_loader import load_config
     from shared.central_leads import PRESET_CATEGORY

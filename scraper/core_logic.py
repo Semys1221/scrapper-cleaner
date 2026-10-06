@@ -525,7 +525,8 @@ class LeadPersistenceError(RuntimeError):
 # The leads CSV is written only after the batch upsert succeeds. Rows still
 # waiting live in pending_supabase.jsonl so a failed save is retried on resume
 # instead of being treated as already scraped. A row that can never be stored
-# (validation, email longer than 320) is moved to pending_supabase.rejected.jsonl.
+# (validation, email longer than 320, SQLSTATE class 22, check violation
+# 23514) is moved to pending_supabase.rejected.jsonl.
 LEAD_SAVE_BATCH = 50
 _PENDING_LEAD_ROWS: list[dict[str, str]] = []
 _COMMITTED_EMAILS: set[str] | None = None
@@ -696,17 +697,76 @@ def _raise_persistence_error(exc: Exception) -> None:
     raise LeadPersistenceError(str(exc)) from exc
 
 
+def _drop_pending_rows(rows: list[dict[str, Any]]) -> None:
+    dropped = {id(row) for row in rows}
+    emails = {_row_email(row) for row in rows}
+    emails.discard("")
+    _PENDING_LEAD_ROWS[:] = [
+        row
+        for row in _PENDING_LEAD_ROWS
+        if id(row) not in dropped and _row_email(row) not in emails
+    ]
+    _rewrite_sidecar(_PENDING_LEAD_ROWS)
+
+
+def _reject_data_error_rows(rows: list[dict[str, Any]], exc: Exception) -> None:
+    from shared.central_leads import postgres_sqlstate
+
+    code = postgres_sqlstate(exc)
+    label = f"{code}: {exc}" if code else str(exc)
+    for row in rows:
+        _append_rejected_row(row, label)
+    _drop_pending_rows(rows)
+
+
+def _save_pending_batch(batch: list[dict[str, str]]) -> None:
+    """Upsert a batch. Split permanent data errors so one bad row does not block the rest."""
+    if not batch:
+        return
+    from shared.central_leads import is_permanent_data_error
+
+    try:
+        _persist_lead_batch(batch)
+    except Exception as exc:
+        if not is_permanent_data_error(exc):
+            _raise_persistence_error(exc)
+        if len(batch) == 1:
+            _reject_data_error_rows(batch, exc)
+            return
+        mid = max(len(batch) // 2, 1)
+        _save_pending_batch(batch[:mid])
+        _save_pending_batch(batch[mid:])
+        return
+    _commit_saved_lead_rows(batch)
+
+
+async def _save_pending_batch_async(batch: list[dict[str, str]]) -> None:
+    if not batch:
+        return
+    from shared.central_leads import is_permanent_data_error
+
+    try:
+        await asyncio.to_thread(_persist_lead_batch, batch)
+    except Exception as exc:
+        if not is_permanent_data_error(exc):
+            _raise_persistence_error(exc)
+        if len(batch) == 1:
+            _reject_data_error_rows(batch, exc)
+            return
+        mid = max(len(batch) // 2, 1)
+        await _save_pending_batch_async(batch[:mid])
+        await _save_pending_batch_async(batch[mid:])
+        return
+    _commit_saved_lead_rows(batch)
+
+
 def _flush_pending_lead_rows_sync() -> None:
     if not _PENDING_LEAD_ROWS:
         return
     batch = _separate_permanent_rejects(list(_PENDING_LEAD_ROWS))
     if not batch:
         return
-    try:
-        _persist_lead_batch(batch)
-    except Exception as exc:
-        _raise_persistence_error(exc)
-    _commit_saved_lead_rows(batch)
+    _save_pending_batch(batch)
 
 
 async def _flush_pending_lead_rows_async() -> None:
@@ -716,11 +776,7 @@ async def _flush_pending_lead_rows_async() -> None:
     batch = _separate_permanent_rejects(list(_PENDING_LEAD_ROWS))
     if not batch:
         return
-    try:
-        await asyncio.to_thread(_persist_lead_batch, batch)
-    except Exception as exc:
-        _raise_persistence_error(exc)
-    _commit_saved_lead_rows(batch)
+    await _save_pending_batch_async(batch)
 
 
 def _queue_lead_row_sync(row: dict[str, str]) -> None:
@@ -1662,6 +1718,26 @@ async def _run_planner_scrape(
     async def _run_one_batch(batch: query_planner.SearchBatch) -> None:
         nonlocal leads_saved, leads_enriched_valid, leads_enriched_rejected
         nonlocal instantly_pushed, batches_run, target_reached
+        recorded = False
+        try:
+            await _execute_reserved_batch(batch)
+            recorded = True
+        except asyncio.CancelledError:
+            if not recorded:
+                planner.release_batch(batch)
+            raise
+        except LeadPersistenceError:
+            if not recorded:
+                planner.release_batch(batch)
+            raise
+        except Exception:
+            if not recorded:
+                planner.abandon_batch(batch)
+            raise
+
+    async def _execute_reserved_batch(batch: query_planner.SearchBatch) -> None:
+        nonlocal leads_saved, leads_enriched_valid, leads_enriched_rejected
+        nonlocal instantly_pushed, batches_run, target_reached
         async with semaphore:
             skip_label = f", skipPlaces={batch.skip_places}" if batch.skip_places else ""
             log_cb(
@@ -1681,6 +1757,8 @@ async def _run_planner_scrape(
             )
             if not results and client.last_error:
                 log_cb(f"Outscraper batch failed: {client.last_error}")
+                planner.abandon_batch(batch)
+                return
             per_query = count_places_per_query(results, len(batch.queries))
 
             def _persist_now(ls: int, lev: int, ip: int) -> None:

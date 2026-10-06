@@ -380,8 +380,46 @@ def _collapse_leads_by_email(
     return [pending[email] for email in order], skipped
 
 
+_SQLSTATE_RE = re.compile(r"\b(22[0-9A-Z]{3}|23514)\b", re.IGNORECASE)
+
+
+def postgres_sqlstate(exc: BaseException) -> str:
+    """Return a 5-character SQLSTATE from an API or driver error, if one is present."""
+    candidates: list[Any] = []
+    for attr in ("code", "sqlstate"):
+        value = getattr(exc, attr, None)
+        if value is not None:
+            candidates.append(value)
+    if exc.args and isinstance(exc.args[0], dict):
+        payload = exc.args[0]
+        candidates.append(payload.get("code"))
+        candidates.append(payload.get("sqlstate"))
+    for value in candidates:
+        if isinstance(value, bool):
+            continue
+        token = str(value).strip().upper()
+        if re.fullmatch(r"[0-9A-Z]{5}", token):
+            return token
+    match = _SQLSTATE_RE.search(f"{type(exc).__name__} {exc}")
+    return match.group(1).upper() if match else ""
+
+
+def is_permanent_data_error(exc: BaseException) -> bool:
+    """True for Postgres errors that will fail again on every retry.
+
+    Class 22 is a data exception (``22P05`` untranslatable character,
+    ``22001`` string too long, and the rest of ``22xxx``). ``23514`` is a
+    check violation. Unique conflicts and missing-schema errors stay transient.
+    """
+    code = postgres_sqlstate(exc)
+    return code.startswith("22") or code == "23514"
+
+
 def classify_probe_error(exc: Exception) -> str:
-    """Label a leads probe failure: rpc-missing, auth, permission, network, or unknown."""
+    """Label a leads probe failure.
+
+    One of: table-missing, rpc-missing, auth, permission, network, unknown.
+    """
     status = getattr(exc, "status_code", None)
     response = getattr(exc, "response", None)
     if not isinstance(status, int) and response is not None:
@@ -390,7 +428,15 @@ def classify_probe_error(exc: Exception) -> str:
     blob = f"{type(exc).__name__} {exc} {code or ''}".lower()
     if status == 401 or any(
         token in blob
-        for token in ("invalid api key", "invalid jwt", "jwt expired", "unauthorized", "not authenticated")
+        for token in (
+            "invalid api key",
+            "invalid jwt",
+            "jwt expired",
+            "unauthorized",
+            "not authenticated",
+            "pgrst301",
+            "jwserror",
+        )
     ):
         return "auth"
     if status == 403 or any(
@@ -401,13 +447,21 @@ def classify_probe_error(exc: Exception) -> str:
     if any(
         token in blob
         for token in (
+            "42p01",
+            "pgrst205",
+            "could not find the table",
+            "undefined_table",
+        )
+    ) or ("relation" in blob and "does not exist" in blob):
+        return "table-missing"
+    if any(
+        token in blob
+        for token in (
             "pgrst202",
             "could not find the function",
             "function not found",
-            "does not exist",
-            "schema cache",
         )
-    ):
+    ) or ("function" in blob and "does not exist" in blob):
         return "rpc-missing"
     if isinstance(exc, (TimeoutError, ConnectionError, OSError)) or any(
         token in blob
@@ -419,6 +473,8 @@ def classify_probe_error(exc: Exception) -> str:
 
 def _probe_error_message(exc: Exception, *, what: str) -> str:
     kind = classify_probe_error(exc)
+    if kind == "table-missing":
+        return f"Central leads table is missing ({exc}). apply 026 first."
     if kind == "rpc-missing":
         return (
             f"Central leads upsert RPC {LEADS_UPSERT_RPC} is not available ({exc}). "
