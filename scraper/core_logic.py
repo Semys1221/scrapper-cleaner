@@ -11,6 +11,7 @@ import re
 import sys
 import threading
 import time
+import weakref
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
@@ -246,6 +247,76 @@ def outscraper_enrichment(config: dict) -> list[str]:
         text = raw.strip()
         return [text] if text else []
     return [str(item).strip() for item in raw if str(item).strip()]
+
+
+# Google Maps medium tier after the monthly free quota. The free 500 places
+# are not subtracted: a short run must not look free and then bill.
+MAPS_USD_PER_1000 = 3.0
+CONTACTS_USD_PER_1000 = 3.0
+DEFAULT_MAX_SCRAPE_COST_USD = 10.0
+
+
+def scrape_spend_plan(
+    config: dict,
+    *,
+    target: int,
+    already_saved: int = 0,
+) -> dict[str, Any]:
+    """Worst-case places and USD for this run, before any paid Outscraper call.
+
+    Places requested are capped by the leads still needed and by
+    ``MAX_SCRAPE_COST_USD`` (default $10). Contacts enrichment adds $3/1,000
+    when it is on. ``refused`` is set when one place already exceeds the cap.
+    """
+    raw_cap = config.get("MAX_SCRAPE_COST_USD", DEFAULT_MAX_SCRAPE_COST_USD)
+    try:
+        max_cost = float(raw_cap)
+    except (TypeError, ValueError):
+        max_cost = DEFAULT_MAX_SCRAPE_COST_USD
+    if max_cost < 0:
+        max_cost = 0.0
+    contacts = bool(outscraper_enrichment(config))
+    per_thousand = MAPS_USD_PER_1000 + (CONTACTS_USD_PER_1000 if contacts else 0.0)
+    usd_per_place = per_thousand / 1000.0
+    remaining = max(int(target) - int(already_saved), 0)
+    by_cost = remaining if usd_per_place <= 0 else int(max_cost / usd_per_place)
+    places = min(remaining, max(by_cost, 0))
+    return {
+        "places": places,
+        "by_cost": by_cost,
+        "target_remaining": remaining,
+        "worst_case_usd": round(places * usd_per_place, 4),
+        "max_cost_usd": max_cost,
+        "usd_per_place": usd_per_place,
+        "usd_per_thousand": per_thousand,
+        "contacts": contacts,
+        "refused": remaining > 0 and by_cost < 1,
+    }
+
+
+def format_scrape_spend(plan: dict[str, Any]) -> str:
+    from shared.phone_enrichment import format_usd
+
+    contacts = ""
+    if plan.get("contacts"):
+        contacts = f" + ${format_usd(CONTACTS_USD_PER_1000)}/1,000 contacts enrichment"
+    return (
+        f"Scrape spend cap — at most {int(plan['places'])} places, "
+        f"worst case ${format_usd(float(plan['worst_case_usd']))} "
+        f"(${format_usd(MAPS_USD_PER_1000)}/1,000 Google Maps{contacts}, "
+        f"medium tier, monthly free quota not applied). "
+        f"Cap ${format_usd(float(plan['max_cost_usd']))}."
+    )
+
+
+def _refuse_scrape_over_budget(plan: dict[str, Any]) -> None:
+    from shared.phone_enrichment import format_usd
+
+    raise SystemExit(
+        "Refusing scrape: worst case for one place "
+        f"(${format_usd(float(plan['usd_per_place']))}) exceeds --max-cost-usd "
+        f"{format_usd(float(plan['max_cost_usd']))}."
+    )
 
 
 def outscraper_request_language(config: dict) -> str:
@@ -535,65 +606,74 @@ class LeadRejectionStormError(LeadPersistenceError):
 #
 # A row is rejected only after its own one-row request fails with a permanent
 # code. Untested rows stay in pending_supabase.jsonl; they are not rejects and
-# do not count toward HERCULE_REJECT_STOP_RATIO. One batch may spend at most
-# MAX_SUPABASE_CALLS_PER_BATCH Supabase calls, then a fresh window continues
-# if something was stored. If a window stores nothing, the scrape stops and
-# the untested rows remain in the retry file. The async flush lock is created
-# for the running loop: main()'s worker calls asyncio.run() more than once
-# in the same process, and a module-level asyncio.Lock() stays bound to the
-# first loop.
+# do not count toward the stop. One flush spends at most
+# MAX_SUPABASE_CALLS_PER_FLUSH Supabase calls, then the lock is released and
+# another pass continues. A single proven bad row never stops the run. The
+# run stops when HERCULE_REJECT_CONSECUTIVE new rejects happen with no
+# successful save between them, or when the proven-reject ratio trips.
+# SQLSTATE class 22 and check 23514 rows in rejected.jsonl are retried on the
+# next startup; a later successful save removes them from that file.
+#
+# Each event loop has its own asyncio.Lock (a lock cannot move across loops).
+# The buffer itself is guarded by _FLUSH_THREAD_LOCK, so two loops in two
+# threads still exclude each other. Never take the asyncio lock from a
+# synchronous caller.
 LEAD_SAVE_BATCH = 50
-MAX_SUPABASE_CALLS_PER_BATCH = 16
+MAX_SUPABASE_CALLS_PER_FLUSH = 32
 REJECT_STOP_RATIO = 0.20
 REJECT_MIN_SAMPLE = 50
+REJECT_CONSECUTIVE = 10
+_RETRIABLE_REJECT_RE = re.compile(r"^(22[0-9A-Z]{3}|23514)\b")
 _PENDING_LEAD_ROWS: list[dict[str, str]] = []
 _COMMITTED_EMAILS: set[str] | None = None
 _COMMITTED_EMAILS_PATH: str | None = None
 _REJECTED_EMAILS: set[str] = set()
 _REJECTED_INDEX_PATH: str | None = None
 _RUN_SAVED_EMAILS: set[str] = set()
+_RUN_COUNTED_REJECTS: set[str] = set()
 _RUN_SAVED = 0
 _RUN_REJECTED = 0
+_RUN_CONSECUTIVE_REJECTS = 0
 _FLUSH_THREAD_LOCK = threading.Lock()
-_FLUSH_ASYNC_LOCK: asyncio.Lock | None = None
-_FLUSH_ASYNC_LOCK_LOOP: asyncio.AbstractEventLoop | None = None
-
-
-def _install_flush_async_lock(loop: asyncio.AbstractEventLoop) -> asyncio.Lock:
-    global _FLUSH_ASYNC_LOCK, _FLUSH_ASYNC_LOCK_LOOP
-    _FLUSH_ASYNC_LOCK = asyncio.Lock()
-    _FLUSH_ASYNC_LOCK_LOOP = loop
-    return _FLUSH_ASYNC_LOCK
+_FLUSH_ASYNC_LOCKS: weakref.WeakKeyDictionary[
+    asyncio.AbstractEventLoop, asyncio.Lock
+] = weakref.WeakKeyDictionary()
+_FLUSH_ASYNC_LOCKS_GUARD = threading.Lock()
 
 
 def _flush_async_lock() -> asyncio.Lock:
-    """Return the flush lock for the running loop, creating it if needed."""
+    """Return this loop's flush lock. A different loop keeps its own lock."""
     loop = asyncio.get_running_loop()
-    if _FLUSH_ASYNC_LOCK is None or _FLUSH_ASYNC_LOCK_LOOP is not loop:
-        return _install_flush_async_lock(loop)
-    return _FLUSH_ASYNC_LOCK
+    with _FLUSH_ASYNC_LOCKS_GUARD:
+        lock = _FLUSH_ASYNC_LOCKS.get(loop)
+        if lock is None:
+            lock = asyncio.Lock()
+            _FLUSH_ASYNC_LOCKS[loop] = lock
+        return lock
 
 
 def _reset_lead_save_buffer() -> None:
     global _COMMITTED_EMAILS, _COMMITTED_EMAILS_PATH, _REJECTED_INDEX_PATH
-    global _RUN_SAVED, _RUN_REJECTED
-    global _FLUSH_ASYNC_LOCK, _FLUSH_ASYNC_LOCK_LOOP
+    global _RUN_SAVED, _RUN_REJECTED, _RUN_CONSECUTIVE_REJECTS
     _PENDING_LEAD_ROWS.clear()
     _COMMITTED_EMAILS = None
     _COMMITTED_EMAILS_PATH = None
     _REJECTED_EMAILS.clear()
     _REJECTED_INDEX_PATH = None
     _RUN_SAVED_EMAILS.clear()
+    _RUN_COUNTED_REJECTS.clear()
     _RUN_SAVED = 0
     _RUN_REJECTED = 0
-    _FLUSH_ASYNC_LOCK = None
-    _FLUSH_ASYNC_LOCK_LOOP = None
+    _RUN_CONSECUTIVE_REJECTS = 0
     try:
         loop = asyncio.get_running_loop()
     except RuntimeError:
         loop = None
-    if loop is not None:
-        _install_flush_async_lock(loop)
+    with _FLUSH_ASYNC_LOCKS_GUARD:
+        if loop is None:
+            _FLUSH_ASYNC_LOCKS.clear()
+        else:
+            _FLUSH_ASYNC_LOCKS[loop] = asyncio.Lock()
 
 
 def _reject_stop_ratio() -> float:
@@ -607,6 +687,13 @@ def _reject_min_sample() -> int:
     raw = os.getenv("HERCULE_REJECT_MIN_SAMPLE", "").strip()
     if not raw:
         return REJECT_MIN_SAMPLE
+    return max(int(raw), 1)
+
+
+def _reject_consecutive_limit() -> int:
+    raw = os.getenv("HERCULE_REJECT_CONSECUTIVE", "").strip()
+    if not raw:
+        return REJECT_CONSECUTIVE
     return max(int(raw), 1)
 
 
@@ -772,7 +859,8 @@ def _persist_lead_batch(rows: list[dict[str, str]]) -> None:
 
 def _commit_saved_lead_rows(batch: list[dict[str, str]]) -> None:
     """Write the CSV only after the Supabase upsert has returned."""
-    global _RUN_SAVED
+    global _RUN_SAVED, _RUN_CONSECUTIVE_REJECTS
+    _RUN_CONSECUTIVE_REJECTS = 0
     already = _committed_emails()
     saved_emails: set[str] = set()
     for row in batch:
@@ -787,6 +875,7 @@ def _commit_saved_lead_rows(batch: list[dict[str, str]]) -> None:
         _write_csv_row(row)
         if email:
             already.add(email)
+    _drop_rejected_emails(saved_emails)
     _PENDING_LEAD_ROWS[:] = [
         row
         for row in _PENDING_LEAD_ROWS
@@ -819,14 +908,70 @@ def _drop_pending_rows(rows: list[dict[str, Any]]) -> None:
     _rewrite_sidecar(_PENDING_LEAD_ROWS)
 
 
+def _note_consecutive_reject(email: str) -> None:
+    """Count a newly proven reject. Stop after N with no successful save between them."""
+    global _RUN_CONSECUTIVE_REJECTS
+    if email:
+        _RUN_COUNTED_REJECTS.add(email)
+    _RUN_CONSECUTIVE_REJECTS += 1
+    limit = _reject_consecutive_limit()
+    if _RUN_CONSECUTIVE_REJECTS >= limit:
+        _raise_mass_rejection(
+            f"{_RUN_CONSECUTIVE_REJECTS} consecutive proven rejects with no successful "
+            f"save in between (stop after {limit})."
+        )
+
+
+def _drop_rejected_emails(emails: set[str]) -> None:
+    """A later successful save removes the row from rejected.jsonl."""
+    global _RUN_REJECTED
+    if not emails:
+        return
+    _ensure_rejected_index()
+    removed = {email for email in emails if email in _REJECTED_EMAILS}
+    if not removed:
+        return
+    _REJECTED_EMAILS.difference_update(removed)
+    for email in removed:
+        if email in _RUN_COUNTED_REJECTS:
+            _RUN_COUNTED_REJECTS.discard(email)
+            _RUN_REJECTED = max(_RUN_REJECTED - 1, 0)
+    path = _rejected_sidecar_path()
+    if not os.path.isfile(path):
+        return
+    kept: list[str] = []
+    with open(path, encoding="utf-8") as handle:
+        for line in handle:
+            text = line.strip()
+            if not text:
+                continue
+            try:
+                item = json.loads(text)
+            except json.JSONDecodeError:
+                kept.append(text)
+                continue
+            email = _row_email(item) if isinstance(item, dict) else ""
+            if email and email in removed:
+                continue
+            kept.append(text)
+    if not kept:
+        os.remove(path)
+        return
+    with open(path, "w", encoding="utf-8") as handle:
+        for text in kept:
+            handle.write(text + "\n")
+
+
 def _reject_data_error_rows(rows: list[dict[str, Any]], exc: Exception) -> None:
     from shared.central_leads import postgres_sqlstate
 
     code = postgres_sqlstate(exc)
     label = f"{code}: {exc}" if code else str(exc)
     for row in rows:
-        _append_rejected_row(row, label, count_toward_stop=True)
-    _drop_pending_rows(rows)
+        fresh = _append_rejected_row(row, label, count_toward_stop=True)
+        _drop_pending_rows([row])
+        if fresh:
+            _note_consecutive_reject(_row_email(row))
 
 
 def _rows_still_open(
@@ -880,15 +1025,6 @@ def _raise_if_run_reject_ratio() -> None:
             f"Rejected {_RUN_REJECTED} of {total} leads ({share:.0%}), "
             f"above the {limit:.0%} stop threshold (minimum sample {minimum})."
         )
-
-
-def _sqlstate_suffix(exc: Exception | None) -> str:
-    if exc is None:
-        return ""
-    from shared.central_leads import postgres_sqlstate
-
-    code = postgres_sqlstate(exc)
-    return f" (SQLSTATE {code})" if code else ""
 
 
 def _probe_permanent_failures(
@@ -1004,21 +1140,22 @@ def _save_with_budget(
 
 
 def _save_pending_batch(batch: list[dict[str, str]]) -> None:
-    """Upsert a batch. Stop when nothing in the batch can be stored, or the run ratio trips.
+    """Upsert one capped pass. Isolated rejects do not stop the run.
 
-    Emails already in the CSV or in rejected.jsonl are sent again. Postgres
-    decides. A successful upsert drops the row from the retry file.
+    The pass shares one call budget. Untested rows stay in the retry file.
+    A run stops only for a streak of proven rejects with no save between
+    them, or for the proven-reject ratio. Emails already stored are sent
+    again; Postgres decides.
     """
     if not batch:
         return
     pending = list(batch)
-    saved_at_start = _RUN_SAVED
-    rejected_at_start = _RUN_REJECTED
+    budget = [MAX_SUPABASE_CALLS_PER_FLUSH]
     last_exc: list[Exception | None] = [None]
-    while pending:
+    while pending and budget[0] > 0:
         saved_before = _RUN_SAVED
         rejected_before = _RUN_REJECTED
-        budget = [MAX_SUPABASE_CALLS_PER_BATCH]
+        pending_before = len(pending)
         done_saved: set[str] = set()
         done_bad: set[str] = set()
         _save_with_budget(pending, budget, done_saved, done_bad, last_exc, probe=True)
@@ -1027,77 +1164,116 @@ def _save_pending_batch(batch: list[dict[str, str]]) -> None:
         rejected = _RUN_REJECTED - rejected_before
         if not untested:
             break
-        if (saved == 0 and rejected == 0) or len(untested) >= len(pending):
+        progressed = saved > 0 or rejected > 0 or len(untested) < pending_before
+        if not progressed:
             _raise_persistence_error(
                 last_exc[0] or RuntimeError("central leads upsert made no progress")
             )
-        if saved == 0 and _RUN_SAVED == saved_at_start:
-            suffix = _sqlstate_suffix(last_exc[0])
-            proven = _RUN_REJECTED - rejected_at_start
-            _raise_mass_rejection(
-                f"Permanent data errors stopped the save{suffix} "
-                f"({proven} proven reject(s); {len(untested)} untested row(s) "
-                "remain in the retry file)."
-            )
         pending = untested
-    total_saved = _RUN_SAVED - saved_at_start
-    total_rejected = _RUN_REJECTED - rejected_at_start
-    if total_saved == 0 and total_rejected:
-        suffix = _sqlstate_suffix(last_exc[0])
-        _raise_mass_rejection(
-            f"Every row in the save batch was rejected as a permanent data error{suffix} "
-            f"({total_rejected} row(s))."
-        )
     _raise_if_run_reject_ratio()
 
 
-def _flush_unlocked() -> None:
-    if not _PENDING_LEAD_ROWS:
-        return
-    batch = _separate_permanent_rejects(list(_PENDING_LEAD_ROWS))
-    if not batch:
-        return
-    _save_pending_batch(batch)
+def _flush_one_pending_pass() -> bool:
+    """One capped save under the thread lock. True when another pass should run."""
+    with _FLUSH_THREAD_LOCK:
+        if not _PENDING_LEAD_ROWS:
+            return False
+        before_n = len(_PENDING_LEAD_ROWS)
+        before_saved = _RUN_SAVED
+        before_rejected = _RUN_REJECTED
+        batch = _separate_permanent_rejects(list(_PENDING_LEAD_ROWS))
+        if batch:
+            _save_pending_batch(batch)
+        after_n = len(_PENDING_LEAD_ROWS)
+        progressed = (
+            _RUN_SAVED > before_saved
+            or _RUN_REJECTED > before_rejected
+            or after_n < before_n
+        )
+        return bool(_PENDING_LEAD_ROWS) and progressed
 
 
 def _flush_pending_lead_rows_sync() -> None:
-    with _FLUSH_THREAD_LOCK:
-        _flush_unlocked()
+    while _flush_one_pending_pass():
+        pass
 
 
 async def _flush_pending_lead_rows_async() -> None:
-    """Upsert off the event loop. One flush owns the buffer at a time."""
-    async with _flush_async_lock():
-        if not _PENDING_LEAD_ROWS:
+    """Upsert off the event loop. The asyncio lock is dropped between capped passes."""
+    while True:
+        async with _flush_async_lock():
+            more = await asyncio.to_thread(_flush_one_pending_pass)
+        if not more:
             return
-        batch = _separate_permanent_rejects(list(_PENDING_LEAD_ROWS))
-        if not batch:
-            return
-        await asyncio.to_thread(_save_pending_batch, batch)
+        await asyncio.sleep(0)
 
 
 def _queue_lead_row_sync(row: dict[str, str]) -> None:
     with _FLUSH_THREAD_LOCK:
         _PENDING_LEAD_ROWS.append(row)
         _append_sidecar(row)
-        if len(_PENDING_LEAD_ROWS) >= LEAD_SAVE_BATCH:
-            _flush_unlocked()
+        should_flush = len(_PENDING_LEAD_ROWS) >= LEAD_SAVE_BATCH
+    if should_flush:
+        _flush_pending_lead_rows_sync()
 
 
 async def _queue_lead_row_async(row: dict[str, str]) -> None:
     async with _flush_async_lock():
-        _PENDING_LEAD_ROWS.append(row)
-        _append_sidecar(row)
-        if len(_PENDING_LEAD_ROWS) >= LEAD_SAVE_BATCH:
-            batch = _separate_permanent_rejects(list(_PENDING_LEAD_ROWS))
-            if batch:
-                await asyncio.to_thread(_save_pending_batch, batch)
+        def _append() -> bool:
+            with _FLUSH_THREAD_LOCK:
+                _PENDING_LEAD_ROWS.append(row)
+                _append_sidecar(row)
+                return len(_PENDING_LEAD_ROWS) >= LEAD_SAVE_BATCH
+
+        should_flush = await asyncio.to_thread(_append)
+        if should_flush:
+            await asyncio.to_thread(_flush_one_pending_pass)
+
+
+def _load_retriable_rejected_rows() -> list[dict[str, Any]]:
+    """Rows rejected for a data error. Local validation rejects stay on disk."""
+    path = _rejected_sidecar_path()
+    if not os.path.isfile(path):
+        return []
+    rows: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    with open(path, encoding="utf-8") as handle:
+        for line in handle:
+            text = line.strip()
+            if not text:
+                continue
+            try:
+                item = json.loads(text)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(item, dict):
+                continue
+            error = str(item.get("error") or "").strip()
+            if not _RETRIABLE_REJECT_RE.match(error):
+                continue
+            email = _row_email(item)
+            if email and email in seen:
+                continue
+            if email:
+                seen.add(email)
+            item.pop("error", None)
+            rows.append(item)
+    return rows
 
 
 async def _retry_unpersisted_leads() -> None:
-    """Replay leads whose Supabase save failed on a previous run."""
+    """Replay leads whose Supabase save failed, including retriable rejects."""
     if not _PENDING_LEAD_ROWS:
         _PENDING_LEAD_ROWS.extend(_load_unpersisted_leads())
+    already = {_row_email(row) for row in _PENDING_LEAD_ROWS}
+    already.discard("")
+    for row in _load_retriable_rejected_rows():
+        email = _row_email(row)
+        if email and email in already:
+            continue
+        _PENDING_LEAD_ROWS.append(row)
+        if email:
+            already.add(email)
     await _flush_pending_lead_rows_async()
 
 
@@ -2009,6 +2185,13 @@ async def _run_planner_scrape(
     out_dir: str = "",
 ) -> tuple[int, int, int, int, bool]:
     """Drive Outscraper via SDK wait + query planner until target or exhaustion."""
+    spend = scrape_spend_plan(config, target=target, already_saved=leads_saved)
+    if spend["refused"]:
+        _refuse_scrape_over_budget(spend)
+    log_cb(format_scrape_spend(spend))
+    places_cap = int(spend["places"])
+    places_reserved = 0
+    issued_limits: dict[int, int] = {}
     out_filters = outscraper_filters(config)
     out_language = outscraper_request_language(config)
     out_enrichment = outscraper_enrichment(config)
@@ -2045,9 +2228,10 @@ async def _run_planner_scrape(
                 f"Outscraper SDK batch {batch.batch_index + 1} "
                 f"({len(batch.queries)} queries{skip_label})..."
             )
+            requested_limit = issued_limits.get(id(batch), settings.limit_per_query)
             results = await client.google_maps_search_batch(
                 batch.queries,
-                settings.limit_per_query,
+                requested_limit,
                 skip_places=batch.skip_places,
                 filters=out_filters or None,
                 language=out_language,
@@ -2112,7 +2296,7 @@ async def _run_planner_scrape(
             planner.record_batch_result(
                 batch,
                 raw_places_per_query=per_query,
-                limit_per_query=settings.limit_per_query,
+                limit_per_query=requested_limit,
             )
             batches_run += 1
             log_cb(
@@ -2144,6 +2328,7 @@ async def _run_planner_scrape(
     while (
         not target_reached
         and not planner.exhausted()
+        and places_reserved < places_cap
         and not _is_target_reached(
             target=target,
             target_mode=target_mode,
@@ -2156,10 +2341,24 @@ async def _run_planner_scrape(
             len(inflight_tasks) < settings.concurrency
             and not planner.exhausted()
             and not target_reached
+            and places_reserved < places_cap
         ):
-            batch = planner.next_batch(settings.batch_size)
+            remaining_places = places_cap - places_reserved
+            per_query = min(settings.limit_per_query, remaining_places)
+            if per_query < 1:
+                break
+            max_queries = min(settings.batch_size, remaining_places // per_query)
+            if max_queries < 1:
+                break
+            batch = planner.next_batch(max_queries)
             if batch is None:
                 break
+            requested = len(batch.queries) * per_query
+            if requested > remaining_places:
+                planner.release_batch(batch)
+                break
+            places_reserved += requested
+            issued_limits[id(batch)] = per_query
             task = asyncio.create_task(_run_one_batch(batch))
             inflight_tasks.add(task)
             task.add_done_callback(inflight_tasks.discard)
@@ -2352,6 +2551,7 @@ async def run_scraper_pipeline(
         )
 
     if dry_run:
+        log_cb(format_scrape_spend(scrape_spend_plan(config, target=target, already_saved=0)))
         push_to_instantly = _apply_uncleaned_push_policy(push_to_instantly, log_cb)
         if not config.get("OUTSCRAPER_API_KEY"):
             log_cb("WARNING: OUTSCRAPER_API_KEY is missing")

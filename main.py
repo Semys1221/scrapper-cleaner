@@ -31,10 +31,12 @@ from audit_filter import run_audit
 from core_logic import (
     backfill_taxonomy_push,
     clear_local_leads,
+    format_scrape_spend,
     output_paths,
     run_email_recovery,
     run_filter_audit,
     run_scraper_pipeline,
+    scrape_spend_plan,
 )
 from scrape_state import detect_recoverable_run, load_scrape_state, target_mode, target_progress_value
 
@@ -324,6 +326,11 @@ def scrape(
         help="Upload leads to Instantly list after each batch (native duplicate skip)",
     ),
     preset: str = PresetOption,
+    max_cost_usd: float = typer.Option(
+        10.0,
+        "--max-cost-usd",
+        help="Hard cap on worst-case Outscraper spend for this run (default 10).",
+    ),
 ) -> None:
     """Run the scraper headlessly in the terminal."""
     preset = _validate_preset(preset)
@@ -354,6 +361,14 @@ def scrape(
             target = int(saved["target"])
             _log(f"Resume — using saved target {target}")
     config["TARGET_LEADS"] = target
+    config["MAX_SCRAPE_COST_USD"] = max_cost_usd
+    spend = scrape_spend_plan(config, target=target, already_saved=0)
+    if spend["refused"]:
+        raise typer.BadParameter(
+            "Refusing scrape: worst case for one place exceeds --max-cost-usd "
+            f"{max_cost_usd}."
+        )
+    typer.secho(format_scrape_spend(spend), fg=typer.colors.YELLOW)
 
     if resume:
         recovery = detect_recoverable_run(

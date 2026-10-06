@@ -337,7 +337,7 @@ def test_cancelled_inflight_batch_is_refetched_on_resume(
                 planner=planner,
                 config=config,
                 settings=OutscraperSettings(batch_size=1, concurrency=2, limit_per_query=5),
-                target=5,
+                target=20,
                 target_mode="csv_saved",
                 run_state=run_state,
                 seen_domain=set(),

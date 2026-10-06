@@ -207,7 +207,7 @@ def test_failed_save_stops_the_run_and_resume_refetches(
     from core_logic import LeadPersistenceError, output_paths, run_scraper_pipeline
 
     config = {
-        "TARGET_LEADS": 5,
+        "TARGET_LEADS": 20,
         "TARGET_MODE": "csv_saved",
         "KEYWORDS": ["plombier"],
         "LOCATIONS": ["Lyon", "Paris"],
@@ -360,7 +360,9 @@ def test_postgres_data_errors_move_to_rejected_sidecar(
     calls_after_save = attempts["n"]
     _reset_lead_save_buffer()
     assert asyncio.run(_retry_unpersisted_leads()) is None
-    assert attempts["n"] == calls_after_save
+    assert attempts["n"] > calls_after_save
+    rejected_again = Path(_rejected_sidecar_path()).read_text(encoding="utf-8")
+    assert rejected_again.count("bad@ex.fr") == 1
 
     _reset_lead_save_buffer()
     sidecar.write_text('{"Email": "wide@ex.fr", "Company": "Wide"}\n', encoding="utf-8")
@@ -369,8 +371,7 @@ def test_postgres_data_errors_move_to_rejected_sidecar(
         raise APIError({"message": "new row violates check constraint leads_category_check", "code": "23514"})
 
     monkeypatch.setattr("shared.central_leads.persist_scraped_leads", persist_check)
-    with pytest.raises(LeadPersistenceError, match="schema mismatch"):
-        asyncio.run(_retry_unpersisted_leads())
+    assert asyncio.run(_retry_unpersisted_leads()) is None
     rejected = Path(_rejected_sidecar_path()).read_text(encoding="utf-8")
     assert "wide@ex.fr" in rejected
     assert "23514" in rejected
@@ -385,8 +386,7 @@ def test_postgres_data_errors_move_to_rejected_sidecar(
         raise RuntimeError("unsupported Unicode escape sequence (SQLSTATE 22P05)")
 
     monkeypatch.setattr("shared.central_leads.persist_scraped_leads", persist_unicode)
-    with pytest.raises(LeadPersistenceError, match="schema mismatch"):
-        asyncio.run(_retry_unpersisted_leads())
+    assert asyncio.run(_retry_unpersisted_leads()) is None
     rejected = Path(_rejected_sidecar_path()).read_text(encoding="utf-8")
     assert "unicode@ex.fr" in rejected
     assert "22P05" in rejected
@@ -453,10 +453,10 @@ def test_all_bad_batch_stops_the_run_without_more_outscraper_calls(
     )
 
     config = {
-        "TARGET_LEADS": 20,
+        "TARGET_LEADS": 200,
         "TARGET_MODE": "csv_saved",
         "KEYWORDS": ["plombier"],
-        "LOCATIONS": ["Lyon", "Paris", "Lille", "Nice"],
+        "LOCATIONS": [f"City{index:02d}" for index in range(12)],
         "EXPANSION_KEYWORDS": [],
         "EXPANSION_LOCATIONS": [],
         "QUERY_PLANNER_USE_DEPARTMENTS": False,
@@ -482,22 +482,24 @@ def test_all_bad_batch_stops_the_run_without_more_outscraper_calls(
                 preset="plombier",
             )
         )
-    assert len(calls) == 1
-    assert "Lyon" in calls[0][0]
-    assert all("Paris" not in query and "Nice" not in query for batch in calls for query in batch)
+    assert len(calls) == 10
+    assert all("City10" not in query and "City11" not in query for batch in calls for query in batch)
     paths = output_paths("plombier")
     sidecar = Path(_sidecar_path())
     assert not sidecar.exists()
     rejected = Path(_rejected_sidecar_path()).read_text(encoding="utf-8")
-    assert rejected.count("@ex.fr") == len({query for batch in calls for query in batch})
+    assert rejected.count("@ex.fr") == 10
     state_path = Path(paths.scrape_state)
-    if state_path.exists():
-        state = state_path.read_text(encoding="utf-8")
-        assert '"slot_skips": {}' in state or '"slot_skips":{}' in state
+    state = __import__("json").loads(state_path.read_text(encoding="utf-8"))
+    assert set(state["planner"]["exhausted_slots"]) == set(range(9))
+    assert "9" not in state["planner"]["slot_skips"]
 
-    from core_logic import MAX_SUPABASE_CALLS_PER_BATCH, _reset_lead_save_buffer, _retry_unpersisted_leads
+    from core_logic import MAX_SUPABASE_CALLS_PER_FLUSH, _reset_lead_save_buffer, _retry_unpersisted_leads
 
     _reset_lead_save_buffer()
+    rejected_path = Path(_rejected_sidecar_path())
+    if rejected_path.exists():
+        rejected_path.unlink()
     attempts["n"] = 0
     solo.clear()
     sidecar.parent.mkdir(parents=True, exist_ok=True)
@@ -505,7 +507,7 @@ def test_all_bad_batch_stops_the_run_without_more_outscraper_calls(
     sidecar.write_text("\n".join(lines) + "\n", encoding="utf-8")
     with pytest.raises(LeadRejectionStormError, match="schema mismatch"):
         asyncio.run(_retry_unpersisted_leads())
-    assert 1 <= attempts["n"] <= MAX_SUPABASE_CALLS_PER_BATCH
+    assert 1 <= attempts["n"] <= MAX_SUPABASE_CALLS_PER_FLUSH * 3
     rejected_emails = _jsonl_emails(_rejected_sidecar_path())
     rejected_emails = {email for email in rejected_emails if email.startswith("user")}
     pending_emails = _jsonl_emails(sidecar)
@@ -753,7 +755,7 @@ def test_sparse_permanent_errors_do_not_stop_a_concurrent_run(
     from core_logic import _rejected_sidecar_path, _sidecar_path, output_paths
 
     _run_plombier(
-        _plombier_pipeline_config(locations, concurrency=concurrency, target=100, limit=20),
+        _plombier_pipeline_config(locations, concurrency=concurrency, target=200, limit=20),
         resume=False,
     )
     rejected_lines = [
@@ -915,7 +917,7 @@ def test_storm_stop_then_fixed_fault_resumes_with_every_good_row(
     )
 
     config = _plombier_pipeline_config(
-        ["Lyon", "Paris"], concurrency=1, target=100, limit=100
+        ["Lyon", "Paris"], concurrency=1, target=400, limit=100
     )
     with pytest.raises(LeadRejectionStormError, match="schema mismatch"):
         _run_plombier(config, resume=False)
@@ -978,6 +980,325 @@ def test_retry_upserts_a_row_already_written_to_the_csv(
     assert seen == ["already@ex.fr"]
     assert not sidecar.exists()
     assert csv_path.read_text(encoding="utf-8").lower().count("already@ex.fr") == 1
+
+
+@pytest.mark.parametrize("concurrency", [3, 6])
+def test_one_row_flushes_do_not_storm(
+    concurrency: int, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One proven bad row per flush must not stop a concurrent run."""
+    from postgrest.exceptions import APIError
+
+    monkeypatch.setenv("HERCULE_DATA_ROOT", str(tmp_path))
+    from core_logic import (
+        _FLUSH_THREAD_LOCK,
+        _PENDING_LEAD_ROWS,
+        _append_sidecar,
+        _flush_async_lock,
+        _flush_one_pending_pass,
+        _rejected_sidecar_path,
+        _reset_lead_save_buffer,
+        _sidecar_path,
+        activate_output_paths,
+        output_paths,
+    )
+
+    activate_output_paths("plombier")
+    _reset_lead_save_buffer()
+    bad = {f"bad{index}@ex.fr" for index in range(3)}
+    good = {f"good{index}@ex.fr" for index in range(27)}
+    order = [f"good{index}@ex.fr" for index in range(27)]
+    for index, email in enumerate(sorted(bad)):
+        order.insert(index * 9, email)
+
+    def persist(rows: list, *, preset: str) -> dict:
+        del preset
+        emails = [str(row.get("Email") or "") for row in rows]
+        if any(email in bad for email in emails):
+            raise APIError({"message": "value too long for type character varying(320)", "code": "22001"})
+        return {"inserted": len(rows), "updated": 0, "skipped": 0}
+
+    monkeypatch.setattr("shared.central_leads.persist_scraped_leads", persist)
+    semaphore = asyncio.Semaphore(concurrency)
+
+    async def _one(email: str) -> None:
+        row = {"Email": email, "Company": "Co"}
+
+        def _body() -> None:
+            with _FLUSH_THREAD_LOCK:
+                _PENDING_LEAD_ROWS.append(row)
+                _append_sidecar(row)
+            _flush_one_pending_pass()
+
+        async with semaphore:
+            async with _flush_async_lock():
+                await asyncio.to_thread(_body)
+
+    async def _all() -> None:
+        await asyncio.gather(*(_one(email) for email in order))
+
+    asyncio.run(_all())
+    assert _jsonl_emails(_rejected_sidecar_path()) == bad
+    saved = _csv_emails(output_paths("plombier").csv)
+    assert good <= saved
+    assert bad.isdisjoint(saved)
+    assert not Path(_sidecar_path()).exists()
+
+
+def test_fault_rejected_rows_are_saved_after_the_fault_is_fixed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from postgrest.exceptions import APIError
+
+    monkeypatch.setenv("HERCULE_DATA_ROOT", str(tmp_path))
+    from core_logic import (
+        _rejected_sidecar_path,
+        _reset_lead_save_buffer,
+        _retry_unpersisted_leads,
+        _sidecar_path,
+        activate_output_paths,
+        output_paths,
+    )
+
+    activate_output_paths("plombier")
+    _reset_lead_save_buffer()
+    sidecar = Path(_sidecar_path())
+    sidecar.parent.mkdir(parents=True, exist_ok=True)
+    sidecar.write_text(
+        "\n".join(
+            [
+                '{"Email": "good1@ex.fr", "Company": "A"}',
+                '{"Email": "good2@ex.fr", "Company": "B"}',
+                '{"Email": "still@ex.fr", "Company": "C"}',
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    fault = {"on": True}
+
+    def persist(rows: list, *, preset: str) -> dict:
+        del preset
+        emails = [str(row.get("Email") or "") for row in rows]
+        if fault["on"] or any(email == "still@ex.fr" for email in emails):
+            code = "22001" if any(email == "still@ex.fr" for email in emails) else "23514"
+            raise APIError({"message": "permanent data error", "code": code})
+        return {"inserted": len(rows), "updated": 0, "skipped": 0}
+
+    monkeypatch.setattr("shared.central_leads.persist_scraped_leads", persist)
+    assert asyncio.run(_retry_unpersisted_leads()) is None
+    assert _jsonl_emails(_rejected_sidecar_path()) == {"good1@ex.fr", "good2@ex.fr", "still@ex.fr"}
+    assert not sidecar.exists()
+
+    fault["on"] = False
+    _reset_lead_save_buffer()
+    assert asyncio.run(_retry_unpersisted_leads()) is None
+    saved = _csv_emails(output_paths("plombier").csv)
+    assert {"good1@ex.fr", "good2@ex.fr"} <= saved
+    assert "still@ex.fr" not in saved
+    assert _jsonl_emails(_rejected_sidecar_path()) == {"still@ex.fr"}
+    assert not sidecar.exists()
+
+
+def test_one_flush_stays_within_the_call_cap_and_drain_finishes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from postgrest.exceptions import APIError
+
+    monkeypatch.setenv("HERCULE_DATA_ROOT", str(tmp_path))
+    from core_logic import (
+        MAX_SUPABASE_CALLS_PER_FLUSH,
+        _PENDING_LEAD_ROWS,
+        _append_sidecar,
+        _rejected_sidecar_path,
+        _reset_lead_save_buffer,
+        _save_pending_batch,
+        activate_output_paths,
+        output_paths,
+    )
+
+    activate_output_paths("plombier")
+    _reset_lead_save_buffer()
+    pattern = (["b", "b", "g"] * 10) + (["b", "g"] * 10)
+    assert pattern.count("b") == 30 and pattern.count("g") == 20
+    bad: set[str] = set()
+    good: set[str] = set()
+    rows: list[dict[str, str]] = []
+    for index, kind in enumerate(pattern):
+        email = f"user{index}@ex.fr"
+        (bad if kind == "b" else good).add(email)
+        row = {"Email": email, "Company": "Co"}
+        rows.append(row)
+        _PENDING_LEAD_ROWS.append(row)
+        _append_sidecar(row)
+    attempts = {"n": 0}
+
+    def persist(batch: list, *, preset: str) -> dict:
+        del preset
+        attempts["n"] += 1
+        emails = [str(row.get("Email") or "") for row in batch]
+        if any(email in bad for email in emails):
+            raise APIError({"message": "value too long", "code": "22001"})
+        return {"inserted": len(rows), "updated": 0, "skipped": 0}
+
+    monkeypatch.setattr("shared.central_leads.persist_scraped_leads", persist)
+    _save_pending_batch(list(rows))
+    assert attempts["n"] == MAX_SUPABASE_CALLS_PER_FLUSH
+    assert _jsonl_emails(_rejected_sidecar_path()).isdisjoint(good)
+    saved = _csv_emails(output_paths("plombier").csv)
+    assert bad.isdisjoint(saved)
+    assert _PENDING_LEAD_ROWS
+
+
+def test_scrape_spend_plan_caps_places_at_the_target() -> None:
+    from core_logic import format_scrape_spend, scrape_spend_plan
+
+    plan = scrape_spend_plan({"OUTSCRAPER_ENRICHMENT": ["leads_n_contacts"]}, target=100)
+    assert plan["places"] == 100
+    assert plan["worst_case_usd"] == 0.6
+    text = format_scrape_spend(plan)
+    assert "worst case $0.60" in text
+    assert "at most 100 places" in text
+    tiny = scrape_spend_plan(
+        {"OUTSCRAPER_ENRICHMENT": ["leads_n_contacts"], "MAX_SCRAPE_COST_USD": 0.001},
+        target=100,
+    )
+    assert tiny["refused"] is True
+    assert tiny["places"] == 0
+
+
+def test_spend_cap_bounds_places_before_any_search(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("HERCULE_DATA_ROOT", str(tmp_path))
+    monkeypatch.delenv("SUPABASE_URL", raising=False)
+    monkeypatch.delenv("SUPABASE_SERVICE_ROLE_KEY", raising=False)
+    calls: list[tuple[int, int]] = []
+    logs: list[str] = []
+
+    async def fake_search(self, queries, limit, **kwargs):  # noqa: ANN001
+        del self, kwargs
+        calls.append((len(queries), int(limit)))
+        found = []
+        for index, query in enumerate(queries):
+            city = query.split(" in ", 1)[1].split(",", 1)[0]
+            found.append(
+                [
+                    {
+                        "name": city,
+                        "site": f"https://{city}.fr",
+                        "email": f"{city}@ex.fr",
+                        "phone": "+33184801234",
+                        "place_id": city,
+                        "city": city,
+                        "type": "Plombier",
+                        "category": "Plumber",
+                    }
+                ]
+            )
+        return found
+
+    def persist(rows: list, *, preset: str) -> dict:
+        del preset
+        return {"inserted": len(rows), "updated": 0, "skipped": 0}
+
+    monkeypatch.setattr("core_logic.OutscraperClient.google_maps_search_batch", fake_search)
+    monkeypatch.setattr("shared.central_leads.persist_scraped_leads", persist)
+    from core_logic import run_scraper_pipeline
+
+    locations = [f"City{index:02d}" for index in range(30)]
+    config = _plombier_pipeline_config(locations, concurrency=6, target=100, limit=50)
+    config["OUTSCRAPER_BATCH_SIZE"] = 25
+    config["OUTSCRAPER_ENRICHMENT"] = ["leads_n_contacts"]
+    config["MAX_SCRAPE_COST_USD"] = 10
+    asyncio.run(
+        run_scraper_pipeline(
+            config,
+            log_cb=logs.append,
+            progress_cb=lambda _progress: None,
+            metric_cb=lambda *_args: None,
+            dry_run=False,
+            push_to_instantly=False,
+            preset="plombier",
+        )
+    )
+    requested = sum(count * limit for count, limit in calls)
+    assert requested <= 100
+    assert requested > 0
+    assert any("worst case" in line for line in logs)
+
+    calls.clear()
+    from core_logic import output_paths
+
+    out_dir = Path(output_paths("plombier").out_dir)
+    for child in out_dir.iterdir():
+        if child.is_file():
+            child.unlink()
+    config["MAX_SCRAPE_COST_USD"] = 0.001
+    with pytest.raises(SystemExit, match="Refusing scrape"):
+        asyncio.run(
+            run_scraper_pipeline(
+                config,
+                log_cb=logs.append,
+                progress_cb=lambda _progress: None,
+                metric_cb=lambda *_args: None,
+                dry_run=False,
+                push_to_instantly=False,
+                preset="plombier",
+            )
+        )
+    assert calls == []
+
+
+def test_two_threads_keep_flush_exclusion(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import threading
+
+    monkeypatch.setenv("HERCULE_DATA_ROOT", str(tmp_path))
+    from core_logic import (
+        _flush_pending_lead_rows_async,
+        _queue_lead_row_async,
+        _reset_lead_save_buffer,
+        _sidecar_path,
+        activate_output_paths,
+        output_paths,
+    )
+
+    activate_output_paths("plombier")
+    _reset_lead_save_buffer()
+    saved: list[str] = []
+    saved_lock = threading.Lock()
+
+    def persist(rows: list, *, preset: str) -> dict:
+        del preset
+        with saved_lock:
+            saved.extend(str(row.get("Email") or "") for row in rows)
+        return {"inserted": len(rows), "updated": 0, "skipped": 0}
+
+    monkeypatch.setattr("shared.central_leads.persist_scraped_leads", persist)
+
+    def _run(emails: list[str]) -> None:
+        async def _go() -> None:
+            await asyncio.gather(
+                *(_queue_lead_row_async({"Email": email, "Company": email}) for email in emails)
+            )
+            await _flush_pending_lead_rows_async()
+
+        asyncio.run(_go())
+
+    first = threading.Thread(target=_run, args=(["t1a@ex.fr", "t1b@ex.fr"],))
+    second = threading.Thread(target=_run, args=(["t2a@ex.fr", "t2b@ex.fr"],))
+    first.start()
+    second.start()
+    first.join()
+    second.join()
+    assert sorted(saved) == ["t1a@ex.fr", "t1b@ex.fr", "t2a@ex.fr", "t2b@ex.fr"]
+    assert _csv_emails(output_paths("plombier").csv) == {
+        "t1a@ex.fr",
+        "t1b@ex.fr",
+        "t2a@ex.fr",
+        "t2b@ex.fr",
+    }
+    assert not Path(_sidecar_path()).exists()
 
 
 def test_load_config_rejects_an_unmapped_preset(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -62,6 +62,18 @@ ExecStart=/usr/bin/python3 main.py heal --preset avocats --stale-minutes 3
 
 `heal` reads `VPS_SCRAPER_SERVICE` (default `hercule-scraper`) and restarts that unit when the worker heartbeat is stale and progress is below `TARGET_LEADS`.
 
+## Smallest live scrape
+
+One preset (one category), no Instantly push, no phone enrichment. From the repo root:
+
+```bash
+python main.py scrape --preset plombier --target 5 --max-cost-usd 1
+```
+
+Do not pass `--push-instantly` (`scrape` leaves it off). Do not run `enrich-phones`. `worker-loop` turns Instantly push on unless you pass `--no-push-instantly`.
+
+The command prints the worst-case cost before any paid call. Google Maps medium tier is $3 per 1,000 places. The default `leads_n_contacts` enrichment adds $3 per 1,000. The monthly free 500 places are not subtracted. `--target` and `--max-cost-usd` (default 10) cap places **requested**: each in-flight batch is reserved before the call, so `--target 100` requests at most 100 places. A cap below the cost of one place refuses the run.
+
 ## Central leads and phone enrichment
 
 Scraped rows are upserted to Supabase `public.leads` (table owned by hercule.dev, `026_leads.sql`) with `status=uncleaned`, `source=scrape`, `status_source=list_payload`, and a one-word `category` such as `PLOMBIER`. The unique key is the generated column `email_normalized`. A repeat scrape does not downgrade status, keeps an existing category, fills only empty phone, website, name, and company fields, and merges new `payload` keys (city, siret, naf, and the other registry fields) without replacing keys already set. An identical re-scrape does not touch `updated_at`. When status moves up, `status_source` moves with it. The cleaner sets `status_source=manual`. Niche presets target 3,000 leads (`presets.yaml` is the source of truth; `configs/*_config.py` matches it, except `jum_advisory` at 500, `runbook_test` at 5,000, and `_adhoc` at 5,000). `courtiers_prevoyance_b2b` maps to `IAS`. `runbook_test` maps to `TEST`, not `COMPTABLE`. Uncleaned leads are not pushed to Instantly unless `HERCULE_ALLOW_UNCLEANED_INSTANTLY_PUSH=1`.
