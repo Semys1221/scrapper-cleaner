@@ -162,7 +162,7 @@ def test_planner_loop_fetches_each_page_once_at_concurrency(
     _reset_lead_save_buffer()
     planner = QueryPlanner.from_config(config)
     client = _PageClient(limit=limit, full_pages=full_pages)
-    leads_saved, *_rest, exhausted = asyncio.run(
+    leads_saved, *_rest, exhausted, budget_exhausted = asyncio.run(
         _run_planner_scrape(
             client=client,
             planner=planner,
@@ -192,6 +192,7 @@ def test_planner_loop_fetches_each_page_once_at_concurrency(
     )
     assert leads_saved == 0
     assert exhausted is True
+    assert budget_exhausted is False
     assert len(client.calls) == len(set(client.calls))
     by_query: dict[str, list[int]] = {}
     for query, skip in client.calls:

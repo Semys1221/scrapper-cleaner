@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 from urllib.parse import urlparse
 
 _LOCAL_HOSTS = {"localhost", "127.0.0.1", "::1"}
@@ -16,16 +15,12 @@ def host_is_local(url: str) -> bool:
 
 
 def strip_nonlocal_credentials(monkeypatch) -> None:
-    """Drop live credentials. A localhost URL is left in place."""
-    remote = False
-    for key in _URL_KEYS:
-        value = os.environ.get(key, "").strip()
-        if value and not host_is_local(value):
-            remote = True
-            monkeypatch.delenv(key, raising=False)
-    if remote:
-        monkeypatch.delenv("SUPABASE_SERVICE_ROLE_KEY", raising=False)
-    for key in _SECRET_KEYS:
+    """Drop Supabase, Outscraper, Instantly, and Pappers credentials.
+
+    Localhost Supabase URLs are removed too: a test must not probe a live
+    database just because the URL points at 127.0.0.1.
+    """
+    for key in (*_URL_KEYS, "SUPABASE_SERVICE_ROLE_KEY", *_SECRET_KEYS):
         monkeypatch.delenv(key, raising=False)
     try:
         from shared.central_leads import reset_supabase_store_cache

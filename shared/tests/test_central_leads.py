@@ -254,6 +254,28 @@ def test_upsert_sql_matches_email_normalized_contract() -> None:
     assert LEADS_CONFLICT_TARGET == "email_normalized"
 
 
+def test_niche_slug_fills_only_when_category_matches() -> None:
+    sql_path = (
+        Path(__file__).resolve().parents[2]
+        / "migrations"
+        / "proposed"
+        / "030_leads_upsert_uncleaned.sql"
+    )
+    sql = sql_path.read_text(encoding="utf-8")
+    old_set = "niche_slug = COALESCE(NULLIF(btrim(%1$I.niche_slug), ''), EXCLUDED.niche_slug)"
+    old_where = (
+        "OR (NULLIF(btrim(%1$I.niche_slug), '') IS NULL AND EXCLUDED.niche_slug IS NOT NULL)"
+    )
+    assert old_set not in sql
+    assert old_where not in sql
+    assert sql.count("btrim(%1$I.category) = btrim(EXCLUDED.category)") >= 2
+    assert "WHEN NULLIF(btrim(%1$I.niche_slug), '') IS NOT NULL THEN %1$I.niche_slug" in sql
+    assert "source_name = COALESCE(NULLIF(btrim(%1$I.source_name), ''), EXCLUDED.source_name)" in sql
+    assert "status = CASE" in sql
+    for column in ("first_name", "last_name", "company", "website", "phone", "job_title", "source_id"):
+        assert f"{column} = COALESCE(NULLIF(btrim(%1$I.{column}), ''), EXCLUDED.{column})" in sql
+
+
 def test_supabase_upsert_is_one_conflict_call() -> None:
     client = _RpcClient()
     store = SupabaseLeadsStore(client, "leads")

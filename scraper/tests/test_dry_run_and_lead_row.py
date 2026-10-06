@@ -1150,21 +1150,52 @@ def test_one_flush_stays_within_the_call_cap_and_drain_finishes(
     assert _PENDING_LEAD_ROWS
 
 
-def test_scrape_spend_plan_caps_places_at_the_target() -> None:
+def test_scrape_spend_plan_bounds_places_by_dollars_not_lead_target() -> None:
     from core_logic import format_scrape_spend, scrape_spend_plan
 
     plan = scrape_spend_plan({"OUTSCRAPER_ENRICHMENT": ["leads_n_contacts"]}, target=100)
-    assert plan["places"] == 100
-    assert plan["worst_case_usd"] == 0.6
+    assert plan["places"] == 1666
+    assert plan["worst_case_usd"] == 9.996
+    assert plan["target_remaining"] == 100
     text = format_scrape_spend(plan)
-    assert "worst case $0.60" in text
-    assert "at most 100 places" in text
+    assert "worst case $9.996" in text
+    assert "at most 1666 places" in text
+    capped = scrape_spend_plan(
+        {"OUTSCRAPER_ENRICHMENT": ["leads_n_contacts"], "MAX_SCRAPE_COST_USD": 0.60},
+        target=100,
+    )
+    assert capped["places"] == 100
+    assert capped["worst_case_usd"] == 0.6
+    assert "worst case $0.60" in format_scrape_spend(capped)
+    assert "at most 100 places" in format_scrape_spend(capped)
     tiny = scrape_spend_plan(
         {"OUTSCRAPER_ENRICHMENT": ["leads_n_contacts"], "MAX_SCRAPE_COST_USD": 0.001},
         target=100,
     )
     assert tiny["refused"] is True
     assert tiny["places"] == 0
+    assert tiny["budget_exhausted"] is False
+    spent = scrape_spend_plan(
+        {"OUTSCRAPER_ENRICHMENT": ["leads_n_contacts"], "MAX_SCRAPE_COST_USD": 0.60},
+        target=100,
+        already_spent_usd=0.516,
+        already_places=86,
+    )
+    assert spent["places"] == 14
+    assert spent["worst_case_usd"] == 0.084
+    assert spent["refused"] is False
+    resume_line = format_scrape_spend(spent)
+    assert "Already spent $0.516 (86 places) on this run." in resume_line
+    assert "worst case $0.084" in resume_line
+    exhausted = scrape_spend_plan(
+        {"OUTSCRAPER_ENRICHMENT": ["leads_n_contacts"], "MAX_SCRAPE_COST_USD": 0.60},
+        target=100,
+        already_spent_usd=0.60,
+        already_places=100,
+    )
+    assert exhausted["places"] == 0
+    assert exhausted["refused"] is False
+    assert exhausted["budget_exhausted"] is True
 
 
 def test_spend_cap_bounds_places_before_any_search(
@@ -1210,7 +1241,7 @@ def test_spend_cap_bounds_places_before_any_search(
     config = _plombier_pipeline_config(locations, concurrency=6, target=100, limit=50)
     config["OUTSCRAPER_BATCH_SIZE"] = 25
     config["OUTSCRAPER_ENRICHMENT"] = ["leads_n_contacts"]
-    config["MAX_SCRAPE_COST_USD"] = 10
+    config["MAX_SCRAPE_COST_USD"] = 0.60
     asyncio.run(
         run_scraper_pipeline(
             config,
@@ -1226,10 +1257,35 @@ def test_spend_cap_bounds_places_before_any_search(
     assert requested <= 100
     assert requested > 0
     assert any("worst case" in line for line in logs)
+    from core_logic import output_paths
+    from scrape_state import load_scrape_state
+
+    state_path = output_paths("plombier").scrape_state
+    charged = load_scrape_state(state_path)
+    assert charged is not None
+    assert int(charged["places_requested_total"]) == requested
 
     calls.clear()
-    from core_logic import output_paths
+    logs.clear()
+    summary = asyncio.run(
+        run_scraper_pipeline(
+            config,
+            log_cb=logs.append,
+            progress_cb=lambda _progress: None,
+            metric_cb=lambda *_args: None,
+            dry_run=False,
+            push_to_instantly=False,
+            resume=True,
+            preset="plombier",
+        )
+    )
+    assert calls == []
+    assert summary["budget_exhausted"] is True
+    assert any("Already spent" in line for line in logs)
+    resumed = load_scrape_state(state_path)
+    assert int(resumed["places_requested_total"]) == requested
 
+    calls.clear()
     out_dir = Path(output_paths("plombier").out_dir)
     for child in out_dir.iterdir():
         if child.is_file():

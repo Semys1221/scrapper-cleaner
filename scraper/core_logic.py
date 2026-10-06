@@ -13,6 +13,7 @@ import threading
 import time
 import weakref
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
@@ -256,17 +257,84 @@ CONTACTS_USD_PER_1000 = 3.0
 DEFAULT_MAX_SCRAPE_COST_USD = 10.0
 
 
+def _utc_day() -> str:
+    return datetime.now(timezone.utc).date().isoformat()
+
+
+def _places_for_budget(budget_usd: float, usd_per_place: float) -> int:
+    """How many places fit in ``budget_usd`` without rounding past the cap."""
+    if usd_per_place <= 0 or budget_usd <= 0:
+        return 0
+    places = int(round(float(budget_usd) / float(usd_per_place), 6))
+    ceiling = round(float(budget_usd), 4)
+    while places > 0 and round(places * float(usd_per_place), 4) > ceiling:
+        places -= 1
+    return places
+
+
+def _optional_positive_int(config: dict, key: str) -> int | None:
+    raw = config.get(key)
+    if raw is None or raw == "":
+        return None
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return None
+    return value if value > 0 else None
+
+
+def scrape_spend_snapshot(run_state: dict[str, Any] | None) -> dict[str, float | int]:
+    """Spend already charged on this preset's scrape state."""
+    if not run_state:
+        return {"already_spent_usd": 0.0, "already_places": 0, "spent_today_usd": 0.0}
+    spent_today = 0.0
+    if str(run_state.get("spend_utc_day") or "") == _utc_day():
+        spent_today = float(run_state.get("spend_usd_today") or 0)
+    return {
+        "already_spent_usd": float(run_state.get("spend_usd_total") or 0),
+        "already_places": int(run_state.get("places_requested_total") or 0),
+        "spent_today_usd": spent_today,
+    }
+
+
+def record_scrape_spend(
+    run_state: dict[str, Any] | None,
+    places: int,
+    usd_per_place: float,
+) -> None:
+    """Persist places about to be sent so a crash cannot forget the charge."""
+    if run_state is None or places <= 0:
+        return
+    from scrape_state import save_scrape_state
+
+    today = _utc_day()
+    if str(run_state.get("spend_utc_day") or "") != today:
+        run_state["spend_usd_today"] = 0.0
+        run_state["spend_utc_day"] = today
+    cost = round(int(places) * float(usd_per_place), 4)
+    run_state["places_requested_total"] = int(run_state.get("places_requested_total") or 0) + int(places)
+    run_state["spend_usd_total"] = round(float(run_state.get("spend_usd_total") or 0) + cost, 4)
+    run_state["spend_usd_today"] = round(float(run_state.get("spend_usd_today") or 0) + cost, 4)
+    save_scrape_state(run_state, path=_active.scrape_state)
+
+
 def scrape_spend_plan(
     config: dict,
     *,
     target: int,
     already_saved: int = 0,
+    already_spent_usd: float = 0.0,
+    already_places: int = 0,
+    spent_today_usd: float = 0.0,
 ) -> dict[str, Any]:
-    """Worst-case places and USD for this run, before any paid Outscraper call.
+    """Places this invocation may still request, and the true worst-case USD.
 
-    Places requested are capped by the leads still needed and by
-    ``MAX_SCRAPE_COST_USD`` (default $10). Contacts enrichment adds $3/1,000
-    when it is on. ``refused`` is set when one place already exceeds the cap.
+    ``--target`` is a lead count. Places are bounded by the dollars still left
+    under ``MAX_SCRAPE_COST_USD`` (and ``MAX_SCRAPE_DAILY_COST_USD`` when set)
+    and by ``MAX_SCRAPE_PLACES`` when set. One maps search is one POST, so
+    ``worst_case_usd`` is places times the per-place rate. ``refused`` means a
+    fresh run cannot afford a single place. ``budget_exhausted`` means earlier
+    spend on this preset state already used the cap.
     """
     raw_cap = config.get("MAX_SCRAPE_COST_USD", DEFAULT_MAX_SCRAPE_COST_USD)
     try:
@@ -278,19 +346,39 @@ def scrape_spend_plan(
     contacts = bool(outscraper_enrichment(config))
     per_thousand = MAPS_USD_PER_1000 + (CONTACTS_USD_PER_1000 if contacts else 0.0)
     usd_per_place = per_thousand / 1000.0
-    remaining = max(int(target) - int(already_saved), 0)
-    by_cost = remaining if usd_per_place <= 0 else int(max_cost / usd_per_place)
-    places = min(remaining, max(by_cost, 0))
+    remaining_leads = max(int(target) - int(already_saved), 0)
+    remaining_budget = max(max_cost - float(already_spent_usd), 0.0)
+    daily_raw = config.get("MAX_SCRAPE_DAILY_COST_USD")
+    if daily_raw is not None and str(daily_raw).strip() != "":
+        try:
+            daily_left = max(float(daily_raw) - float(spent_today_usd), 0.0)
+        except (TypeError, ValueError):
+            daily_left = remaining_budget
+        remaining_budget = min(remaining_budget, daily_left)
+    by_cost = _places_for_budget(remaining_budget, usd_per_place)
+    places = by_cost
+    max_places = _optional_positive_int(config, "MAX_SCRAPE_PLACES")
+    if max_places is not None:
+        places = min(places, max(max_places - int(already_places), 0))
+    fresh = (
+        float(already_spent_usd) <= 0
+        and int(already_places) <= 0
+        and float(spent_today_usd) <= 0
+    )
+    refused = remaining_leads > 0 and places < 1 and fresh
     return {
         "places": places,
         "by_cost": by_cost,
-        "target_remaining": remaining,
+        "target_remaining": remaining_leads,
         "worst_case_usd": round(places * usd_per_place, 4),
         "max_cost_usd": max_cost,
         "usd_per_place": usd_per_place,
         "usd_per_thousand": per_thousand,
         "contacts": contacts,
-        "refused": remaining > 0 and by_cost < 1,
+        "already_spent_usd": round(float(already_spent_usd), 4),
+        "already_places": int(already_places),
+        "refused": refused,
+        "budget_exhausted": (not refused) and places < 1 and remaining_leads > 0,
     }
 
 
@@ -300,13 +388,43 @@ def format_scrape_spend(plan: dict[str, Any]) -> str:
     contacts = ""
     if plan.get("contacts"):
         contacts = f" + ${format_usd(CONTACTS_USD_PER_1000)}/1,000 contacts enrichment"
-    return (
+    line = (
         f"Scrape spend cap — at most {int(plan['places'])} places, "
         f"worst case ${format_usd(float(plan['worst_case_usd']))} "
         f"(${format_usd(MAPS_USD_PER_1000)}/1,000 Google Maps{contacts}, "
         f"medium tier, monthly free quota not applied). "
         f"Cap ${format_usd(float(plan['max_cost_usd']))}."
     )
+    already = float(plan.get("already_spent_usd") or 0)
+    if already > 0:
+        line += (
+            f" Already spent ${format_usd(already)} "
+            f"({int(plan.get('already_places') or 0)} places) on this run."
+        )
+    return line
+
+
+def next_worker_wait(
+    *,
+    progressed: bool,
+    budget_exhausted: bool,
+    streak: int,
+    sleep_s: int,
+) -> tuple[int, float | None]:
+    """Seconds to sleep before the next worker iteration.
+
+    ``None`` means stop: the preset budget is exhausted. Zero progress backs
+    off from 30s up to 15 minutes. Progress resets the streak.
+    """
+    if budget_exhausted:
+        return streak, None
+    if not progressed:
+        new_streak = int(streak) + 1
+        delay = min(max(float(sleep_s) * (2 ** min(new_streak, 6)), 30.0), 900.0)
+        return new_streak, delay
+    if sleep_s > 0:
+        return 0, float(sleep_s)
+    return 0, 0.0
 
 
 def _refuse_scrape_over_budget(plan: dict[str, Any]) -> None:
@@ -2183,21 +2301,55 @@ async def _run_planner_scrape(
     instantly_pushed: int,
     preset: str = "",
     out_dir: str = "",
-) -> tuple[int, int, int, int, bool]:
-    """Drive Outscraper via SDK wait + query planner until target or exhaustion."""
-    spend = scrape_spend_plan(config, target=target, already_saved=leads_saved)
+) -> tuple[int, int, int, int, bool, bool]:
+    """Drive Outscraper until the lead target, the spend cap, or exhaustion.
+
+    The last bool is budget_exhausted. Places are reserved in memory when a
+    batch is issued and charged on the scrape state immediately before the
+    paid call. A stop or cancel before that call refunds the reservation and
+    does not start a new request.
+    """
+    prior = scrape_spend_snapshot(run_state)
+    spend = scrape_spend_plan(
+        config,
+        target=target,
+        already_saved=leads_saved,
+        already_spent_usd=float(prior["already_spent_usd"]),
+        already_places=int(prior["already_places"]),
+        spent_today_usd=float(prior["spent_today_usd"]),
+    )
     if spend["refused"]:
         _refuse_scrape_over_budget(spend)
     log_cb(format_scrape_spend(spend))
+    if spend["budget_exhausted"] or (
+        int(spend["places"]) < 1 and int(spend["target_remaining"]) > 0
+    ):
+        log_cb("Spend budget exhausted — stopping before any Outscraper request.")
+        return (
+            leads_saved,
+            leads_enriched_valid,
+            leads_enriched_rejected,
+            instantly_pushed,
+            False,
+            True,
+        )
     places_cap = int(spend["places"])
+    usd_per_place = float(spend["usd_per_place"])
     places_reserved = 0
     issued_limits: dict[int, int] = {}
+    charged_batches: set[int] = set()
     out_filters = outscraper_filters(config)
     out_language = outscraper_request_language(config)
     out_enrichment = outscraper_enrichment(config)
     batches_run = 0
     target_reached = False
+    stopping = False
     semaphore = asyncio.Semaphore(settings.concurrency)
+
+    def _refund_reservation(batch: query_planner.SearchBatch) -> None:
+        nonlocal places_reserved
+        requested = len(batch.queries) * int(issued_limits.get(id(batch), 0))
+        places_reserved = max(0, places_reserved - requested)
 
     async def _run_one_batch(batch: query_planner.SearchBatch) -> None:
         nonlocal leads_saved, leads_enriched_valid, leads_enriched_rejected
@@ -2209,6 +2361,8 @@ async def _run_planner_scrape(
         except asyncio.CancelledError:
             if not recorded:
                 planner.release_batch(batch)
+                if id(batch) not in charged_batches:
+                    _refund_reservation(batch)
             raise
         except LeadPersistenceError:
             if not recorded:
@@ -2221,14 +2375,30 @@ async def _run_planner_scrape(
 
     async def _execute_reserved_batch(batch: query_planner.SearchBatch) -> None:
         nonlocal leads_saved, leads_enriched_valid, leads_enriched_rejected
-        nonlocal instantly_pushed, batches_run, target_reached
+        nonlocal instantly_pushed, batches_run, target_reached, stopping
         async with semaphore:
+            if stopping or target_reached or _is_target_reached(
+                target=target,
+                target_mode=target_mode,
+                leads_saved=leads_saved,
+                instantly_pushed=instantly_pushed,
+                config=config,
+            ):
+                planner.release_batch(batch)
+                _refund_reservation(batch)
+                return
+            requested_limit = issued_limits.get(id(batch), settings.limit_per_query)
+            record_scrape_spend(
+                run_state,
+                len(batch.queries) * requested_limit,
+                usd_per_place,
+            )
+            charged_batches.add(id(batch))
             skip_label = f", skipPlaces={batch.skip_places}" if batch.skip_places else ""
             log_cb(
                 f"Outscraper SDK batch {batch.batch_index + 1} "
                 f"({len(batch.queries)} queries{skip_label})..."
             )
-            requested_limit = issued_limits.get(id(batch), settings.limit_per_query)
             results = await client.google_maps_search_batch(
                 batch.queries,
                 requested_limit,
@@ -2319,76 +2489,108 @@ async def _run_planner_scrape(
                 )
             if batch_target_reached:
                 target_reached = True
+                stopping = True
             if target_mode in ("instantly_pushed", "instantly_pushed_run"):
                 progress_cb(min(instantly_pushed / target, 1.0) if target else 0.0)
             else:
                 progress_cb(min(leads_saved / target, 1.0) if target else 0.0)
 
     inflight_tasks: set[asyncio.Task] = set()
-    while (
-        not target_reached
-        and not planner.exhausted()
-        and places_reserved < places_cap
-        and not _is_target_reached(
-            target=target,
-            target_mode=target_mode,
-            leads_saved=leads_saved,
-            instantly_pushed=instantly_pushed,
-            config=config,
-        )
-    ):
+
+    def _cancel_inflight() -> list[asyncio.Task]:
+        nonlocal stopping
+        stopping = True
+        pending_tasks = list(inflight_tasks)
+        for task in pending_tasks:
+            task.cancel()
+        return pending_tasks
+
+    try:
         while (
-            len(inflight_tasks) < settings.concurrency
-            and not planner.exhausted()
+            not stopping
             and not target_reached
+            and not planner.exhausted()
             and places_reserved < places_cap
+            and not _is_target_reached(
+                target=target,
+                target_mode=target_mode,
+                leads_saved=leads_saved,
+                instantly_pushed=instantly_pushed,
+                config=config,
+            )
         ):
-            remaining_places = places_cap - places_reserved
-            per_query = min(settings.limit_per_query, remaining_places)
-            if per_query < 1:
-                break
-            max_queries = min(settings.batch_size, remaining_places // per_query)
-            if max_queries < 1:
-                break
-            batch = planner.next_batch(max_queries)
-            if batch is None:
-                break
-            requested = len(batch.queries) * per_query
-            if requested > remaining_places:
-                planner.release_batch(batch)
-                break
-            places_reserved += requested
-            issued_limits[id(batch)] = per_query
-            task = asyncio.create_task(_run_one_batch(batch))
-            inflight_tasks.add(task)
-            task.add_done_callback(inflight_tasks.discard)
+            while (
+                not stopping
+                and len(inflight_tasks) < settings.concurrency
+                and not planner.exhausted()
+                and not target_reached
+                and places_reserved < places_cap
+            ):
+                remaining_places = places_cap - places_reserved
+                per_query = min(settings.limit_per_query, remaining_places)
+                if per_query < 1:
+                    break
+                max_queries = min(settings.batch_size, remaining_places // per_query)
+                if max_queries < 1:
+                    break
+                batch = planner.next_batch(max_queries)
+                if batch is None:
+                    break
+                requested = len(batch.queries) * per_query
+                if requested > remaining_places:
+                    planner.release_batch(batch)
+                    break
+                places_reserved += requested
+                issued_limits[id(batch)] = per_query
+                task = asyncio.create_task(_run_one_batch(batch))
+                inflight_tasks.add(task)
+                task.add_done_callback(inflight_tasks.discard)
 
-        if not inflight_tasks:
-            break
-
-        done, pending = await asyncio.wait(
-            inflight_tasks,
-            return_when=asyncio.FIRST_COMPLETED,
-        )
-        persistence_error: LeadPersistenceError | None = None
-        for finished in done:
-            try:
-                await finished
-            except LeadPersistenceError as exc:
-                persistence_error = exc
+            if not inflight_tasks:
                 break
-            except Exception as exc:
-                log_cb(f"Batch processing error: {exc}")
-        if persistence_error is not None:
-            for task in pending:
-                task.cancel()
-            if pending:
-                await asyncio.gather(*pending, return_exceptions=True)
-            log_cb(f"Lead save failed — stopping the scrape: {persistence_error}")
-            raise persistence_error
 
-    if inflight_tasks:
-        await asyncio.gather(*inflight_tasks, return_exceptions=True)
+            done, pending = await asyncio.wait(
+                inflight_tasks,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            persistence_error: LeadPersistenceError | None = None
+            for finished in done:
+                try:
+                    await finished
+                except LeadPersistenceError as exc:
+                    persistence_error = exc
+                    break
+                except Exception as exc:
+                    log_cb(f"Batch processing error: {exc}")
+            if persistence_error is not None:
+                pending_tasks = _cancel_inflight()
+                if pending_tasks:
+                    await asyncio.gather(*pending_tasks, return_exceptions=True)
+                log_cb(f"Lead save failed — stopping the scrape: {persistence_error}")
+                raise persistence_error
+            if target_reached or _is_target_reached(
+                target=target,
+                target_mode=target_mode,
+                leads_saved=leads_saved,
+                instantly_pushed=instantly_pushed,
+                config=config,
+            ):
+                stopping = True
+
+        if inflight_tasks:
+            stopping = True
+            await asyncio.gather(*inflight_tasks, return_exceptions=True)
+    except BaseException as exc:
+        pending_tasks = _cancel_inflight()
+        current = asyncio.current_task()
+        if isinstance(exc, asyncio.CancelledError) and current is not None:
+            uncancel = getattr(current, "uncancel", None)
+            if uncancel is not None:
+                while uncancel():
+                    pass
+        if pending_tasks:
+            await asyncio.gather(*pending_tasks, return_exceptions=True)
+        raise
 
     exhausted = planner.exhausted()
     return (
@@ -2397,6 +2599,7 @@ async def _run_planner_scrape(
         leads_enriched_rejected,
         instantly_pushed,
         exhausted,
+        False,
     )
 
 
@@ -2474,6 +2677,7 @@ async def run_scraper_pipeline(
         "geo_reload_exhausted": False,
         "resumed": resume,
         "preset": preset,
+        "budget_exhausted": False,
     }
 
     pass0_queries = build_queries(config, 0)
@@ -2483,8 +2687,8 @@ async def run_scraper_pipeline(
         f"(batch {settings.batch_size}, concurrency {settings.concurrency})"
     )
     log_cb(
-        f"Outscraper SDK: limit/query={settings.limit_per_query}, "
-        f"wait_async (no manual poll loop)"
+        f"Outscraper: limit/query={settings.limit_per_query}, "
+        f"one POST per batch then poll by request id"
     )
     log_cb(f"Target: {target} ({mode}) — output: {paths.out_dir}")
     enrich_cfg = _enrich_settings(config)
@@ -2734,6 +2938,8 @@ async def run_scraper_pipeline(
             query_pass=initial_query_pass(config),
             last_completed_batch_index=-1,
         )
+        if existing_state and existing_state.get("email_recovery_spend_usd"):
+            run_state["email_recovery_spend_usd"] = float(existing_state["email_recovery_spend_usd"])
         save_scrape_state(run_state, path=_active.scrape_state)
         log_cb(f"Resuming from CSV without checkpoint ({leads_saved} leads in CSV).")
     else:
@@ -2748,6 +2954,8 @@ async def run_scraper_pipeline(
             query_pass=initial_query_pass(config),
             last_completed_batch_index=-1,
         )
+        if existing_state and existing_state.get("email_recovery_spend_usd"):
+            run_state["email_recovery_spend_usd"] = float(existing_state["email_recovery_spend_usd"])
         save_scrape_state(run_state, path=_active.scrape_state)
         start_pass = initial_query_pass(config)
         if start_pass > 0:
@@ -2819,6 +3027,7 @@ async def run_scraper_pipeline(
             leads_enriched_rejected,
             instantly_pushed,
             planner_exhausted,
+            budget_exhausted,
         ) = await _run_planner_scrape(
             client=out_client,
             planner=planner,
@@ -2846,6 +3055,7 @@ async def run_scraper_pipeline(
             out_dir=paths.out_dir,
         )
         summary["geo_reload_exhausted"] = planner_exhausted
+        summary["budget_exhausted"] = budget_exhausted
         if run_state is not None and planner_exhausted:
             run_state["geo_reload_exhausted"] = True
             save_scrape_state(run_state, path=_active.scrape_state)
@@ -3277,6 +3487,41 @@ def _website_from_recovery_result(item: dict[str, Any], fallback: str) -> str:
     return fallback
 
 
+def _email_recovery_allowance(
+    state_path: str,
+    *,
+    max_cost_usd: float,
+    domain_count: int,
+    limit: int,
+) -> tuple[int, float, float]:
+    """Domains still affordable, this call's worst case, and spend so far."""
+    from scrape_state import load_scrape_state
+
+    state = load_scrape_state(state_path) or {}
+    spent = float(state.get("email_recovery_spend_usd") or 0)
+    usd_per_domain = CONTACTS_USD_PER_1000 / 1000.0
+    remaining = max(float(max_cost_usd) - spent, 0.0)
+    affordable = _places_for_budget(remaining, usd_per_domain)
+    if limit > 0:
+        affordable = min(affordable, int(limit))
+    affordable = min(affordable, max(int(domain_count), 0))
+    return affordable, round(affordable * usd_per_domain, 4), spent
+
+
+def _charge_email_recovery(state_path: str, domains: int) -> None:
+    from scrape_state import load_scrape_state, save_scrape_state
+
+    if domains <= 0:
+        return
+    state = load_scrape_state(state_path) or {}
+    cost = round(int(domains) * CONTACTS_USD_PER_1000 / 1000.0, 4)
+    state["email_recovery_spend_usd"] = round(
+        float(state.get("email_recovery_spend_usd") or 0) + cost,
+        4,
+    )
+    save_scrape_state(state, state_path)
+
+
 async def run_email_recovery(
     config: dict,
     *,
@@ -3285,8 +3530,14 @@ async def run_email_recovery(
     batch_size: int = 25,
     push_to_instantly: bool = True,
     dry_run: bool = False,
+    max_cost_usd: float = 10.0,
+    limit: int = 0,
 ) -> dict[str, Any]:
-    """Recover emails for queued domains via Outscraper emails-and-contacts."""
+    """Recover emails for queued domains via Outscraper emails-and-contacts.
+
+    ``max_cost_usd`` is cumulative on this preset's scrape state. Domains past
+    the cap stay in the queue.
+    """
     paths = activate_output_paths(preset or "biggy_agency")
     queued = _load_email_recovery_queue(paths.email_recovery)
     unique = _dedupe_recovery_by_website(queued)
@@ -3299,6 +3550,9 @@ async def run_email_recovery(
         "skipped_duplicate": 0,
         "failed": 0,
         "dry_run": dry_run,
+        "domains_sent": 0,
+        "budget_exhausted": False,
+        "worst_case_usd": 0.0,
     }
     if not unique:
         log_cb("Email recovery — queue empty.")
@@ -3330,18 +3584,44 @@ async def run_email_recovery(
     accepted_rows: list[dict[str, str]] = []
     chunk = max(int(batch_size), 1)
 
+    from shared.phone_enrichment import format_usd
+
+    cap = float(max_cost_usd)
+    affordable, worst_case, spent = _email_recovery_allowance(
+        paths.scrape_state,
+        max_cost_usd=cap,
+        domain_count=len(unique),
+        limit=limit,
+    )
+    summary["worst_case_usd"] = worst_case
+    log_cb(
+        f"Email recovery spend cap — at most {affordable} domain(s), "
+        f"worst case ${format_usd(worst_case)} "
+        f"(${format_usd(CONTACTS_USD_PER_1000)}/1,000 emails-and-contacts). "
+        f"Cap ${format_usd(cap)}. Already spent ${format_usd(spent)}."
+    )
     log_cb(
         f"Email recovery — {len(unique)} unique domain(s) "
         f"(from {len(queued)} queued row(s)), batch_size={chunk}"
     )
+    if affordable < 1:
+        summary["budget_exhausted"] = True
+        log_cb("Email recovery budget exhausted — no Outscraper request sent.")
+        return summary
 
-    for offset in range(0, len(unique), chunk):
-        batch = unique[offset : offset + chunk]
+    work = unique[:affordable]
+    processed_sites: set[str] = set()
+
+    for offset in range(0, len(work), chunk):
+        batch = work[offset : offset + chunk]
         domains = [str(row.get("website") or "") for row in batch]
         log_cb(f"Recovering emails batch {offset // chunk + 1} — {len(domains)} domain(s)")
         if dry_run:
             continue
+        _charge_email_recovery(paths.scrape_state, len(domains))
+        summary["domains_sent"] += len(domains)
         results = await client.emails_and_contacts(domains)
+        processed_sites.update(_normalize_web(domain) for domain in domains if domain)
         by_domain: dict[str, dict[str, Any]] = {}
         for item in results:
             if not isinstance(item, dict):
@@ -3420,11 +3700,24 @@ async def run_email_recovery(
     if not dry_run:
         await _flush_pending_lead_rows_async()
 
-    if not dry_run and unique:
-        # Clear sidecar after a successful recovery pass
+    if not dry_run and processed_sites:
+        kept: list[dict[str, Any]] = []
+        seen_kept: set[str] = set()
+        for row in queued:
+            website = _normalize_web(str(row.get("website") or ""))
+            if not website or website in processed_sites or website in seen_kept:
+                continue
+            seen_kept.add(website)
+            kept.append(row)
         with open(paths.email_recovery, "w", encoding="utf-8") as handle:
-            handle.write("")
-        log_cb(f"Email recovery queue cleared — {paths.email_recovery}")
+            for row in kept:
+                handle.write(json.dumps(row, ensure_ascii=False) + "\n")
+        if kept:
+            log_cb(
+                f"Email recovery queue kept {len(kept)} unsent domain(s) — {paths.email_recovery}"
+            )
+        else:
+            log_cb(f"Email recovery queue cleared — {paths.email_recovery}")
 
     log_cb(
         f"Email recovery done — recovered={summary['recovered']}, "

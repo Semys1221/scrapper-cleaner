@@ -22,6 +22,11 @@
 -- value is empty AND the incoming value is non-empty. updated_at stays put
 -- and the row is not counted as updated.
 --
+-- niche_slug is the exception to unconditional fill-if-empty: it is filled
+-- only when the existing slug is empty AND the existing category is empty
+-- or equal to the incoming category. A row that already has a different
+-- category keeps a blank niche_slug.
+--
 -- instantly_lead_id collisions (another email already owns that id, or the
 -- same batch repeats it) do not abort the batch. The id is omitted and a
 -- WARNING is raised. The email row is still inserted or merged.
@@ -173,7 +178,13 @@ BEGIN
         website = COALESCE(NULLIF(btrim(%1$I.website), ''), EXCLUDED.website),
         phone = COALESCE(NULLIF(btrim(%1$I.phone), ''), EXCLUDED.phone),
         job_title = COALESCE(NULLIF(btrim(%1$I.job_title), ''), EXCLUDED.job_title),
-        niche_slug = COALESCE(NULLIF(btrim(%1$I.niche_slug), ''), EXCLUDED.niche_slug),
+        niche_slug = CASE
+          WHEN NULLIF(btrim(%1$I.niche_slug), '') IS NOT NULL THEN %1$I.niche_slug
+          WHEN %1$I.category IS NULL OR btrim(%1$I.category) = ''
+            OR btrim(%1$I.category) = btrim(EXCLUDED.category)
+          THEN EXCLUDED.niche_slug
+          ELSE %1$I.niche_slug
+        END,
         source_name = COALESCE(NULLIF(btrim(%1$I.source_name), ''), EXCLUDED.source_name),
         source_id = COALESCE(NULLIF(btrim(%1$I.source_id), ''), EXCLUDED.source_id),
         payload = COALESCE(%1$I.payload, '{}'::jsonb) || COALESCE((
@@ -200,7 +211,14 @@ BEGIN
         OR (NULLIF(btrim(%1$I.website), '') IS NULL AND EXCLUDED.website IS NOT NULL)
         OR (NULLIF(btrim(%1$I.phone), '') IS NULL AND EXCLUDED.phone IS NOT NULL)
         OR (NULLIF(btrim(%1$I.job_title), '') IS NULL AND EXCLUDED.job_title IS NOT NULL)
-        OR (NULLIF(btrim(%1$I.niche_slug), '') IS NULL AND EXCLUDED.niche_slug IS NOT NULL)
+        OR (
+          NULLIF(btrim(%1$I.niche_slug), '') IS NULL
+          AND EXCLUDED.niche_slug IS NOT NULL
+          AND (
+            %1$I.category IS NULL OR btrim(%1$I.category) = ''
+            OR btrim(%1$I.category) = btrim(EXCLUDED.category)
+          )
+        )
         OR (NULLIF(btrim(%1$I.source_name), '') IS NULL AND EXCLUDED.source_name IS NOT NULL)
         OR (NULLIF(btrim(%1$I.source_id), '') IS NULL AND EXCLUDED.source_id IS NOT NULL)
         OR EXISTS (
