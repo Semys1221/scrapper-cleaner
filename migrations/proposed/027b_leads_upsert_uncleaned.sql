@@ -9,13 +9,32 @@
 --
 -- status_source:
 --   scraped inserts use 'list_payload' (this pipeline chose the initial status).
---   ON CONFLICT does not change status_source.
+--   ON CONFLICT copies status_source only when status moves up
+--   (lead_status_rank(incoming) > lead_status_rank(existing)).
 --   The cleaner sets status_source to 'manual' in its own status update.
 --
 -- source for scraped rows is 'scrape' (free text; hercule imports use
 -- 'instantly_import' and 'campaign'). source_name is 'outscraper'.
 -- payload JSONB is merged: existing keys stay, empty incoming values do not
 -- blank them, new keys are filled.
+--
+-- An identical re-scrape is a no-op: a column is updated only when the stored
+-- value is empty AND the incoming value is non-empty. updated_at stays put
+-- and the row is not counted as updated.
+--
+-- instantly_lead_id collisions (another email already owns that id, or the
+-- same batch repeats it) do not abort the batch. The id is omitted and a
+-- WARNING is raised. The email row is still inserted or merged.
+
+CREATE OR REPLACE FUNCTION public.leads_note_instantly_id_skip(p_email text, p_lead_id text)
+RETURNS text
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  RAISE WARNING 'leads_upsert_uncleaned: skipped instantly_lead_id % for % (collision)', p_lead_id, p_email;
+  RETURN NULL;
+END;
+$$;
 
 CREATE OR REPLACE FUNCTION public.leads_upsert_uncleaned(
   p_rows jsonb,
@@ -87,6 +106,37 @@ BEGIN
       WHERE position('@' in lower(btrim(coalesce(email, '')))) > 0
       ORDER BY lower(btrim(email))
     ),
+    prepared AS (
+      SELECT
+        i.*,
+        row_number() OVER (
+          PARTITION BY i.instantly_lead_id
+          ORDER BY i.email
+        ) AS instantly_id_rank
+      FROM incoming i
+    ),
+    safe AS (
+      SELECT
+        p.*,
+        CASE
+          WHEN p.instantly_lead_id IS NULL THEN NULL
+          WHEN p.instantly_id_rank > 1 THEN public.leads_note_instantly_id_skip(p.email, p.instantly_lead_id)
+          WHEN EXISTS (
+            SELECT 1
+            FROM public.%1$I existing
+            WHERE existing.instantly_lead_id = p.instantly_lead_id
+              AND existing.email_normalized IS DISTINCT FROM p.email
+          ) THEN public.leads_note_instantly_id_skip(p.email, p.instantly_lead_id)
+          WHEN EXISTS (
+            SELECT 1
+            FROM public.%1$I existing
+            WHERE existing.instantly_lead_id = p.instantly_lead_id
+              AND existing.email_normalized = p.email
+          ) THEN NULL
+          ELSE p.instantly_lead_id
+        END AS safe_instantly_lead_id
+      FROM prepared p
+    ),
     upserted AS (
       INSERT INTO public.%1$I (
         email, first_name, last_name, company, website, phone, job_title,
@@ -99,14 +149,19 @@ BEGIN
         email, first_name, last_name, company, website, phone, job_title,
         category, niche_slug, source_name, source, source_id,
         status, status_source,
-        instantly_lead_id, instantly_list_id, list_id,
+        safe_instantly_lead_id, instantly_list_id, list_id,
         payload, created_at, updated_at
-      FROM incoming
+      FROM safe
       ON CONFLICT (email_normalized) DO UPDATE SET
         status = CASE
           WHEN public.lead_status_rank(EXCLUDED.status) > public.lead_status_rank(%1$I.status)
           THEN EXCLUDED.status
           ELSE %1$I.status
+        END,
+        status_source = CASE
+          WHEN public.lead_status_rank(EXCLUDED.status) > public.lead_status_rank(%1$I.status)
+          THEN EXCLUDED.status_source
+          ELSE %1$I.status_source
         END,
         category = CASE
           WHEN %1$I.category IS NULL OR btrim(%1$I.category) = '' THEN EXCLUDED.category
@@ -135,16 +190,19 @@ BEGIN
         updated_at = now()
       WHERE
         public.lead_status_rank(EXCLUDED.status) > public.lead_status_rank(%1$I.status)
-        OR (%1$I.category IS NULL OR btrim(%1$I.category) = '')
-        OR NULLIF(btrim(%1$I.first_name), '') IS NULL
-        OR NULLIF(btrim(%1$I.last_name), '') IS NULL
-        OR NULLIF(btrim(%1$I.company), '') IS NULL
-        OR NULLIF(btrim(%1$I.website), '') IS NULL
-        OR NULLIF(btrim(%1$I.phone), '') IS NULL
-        OR NULLIF(btrim(%1$I.job_title), '') IS NULL
-        OR NULLIF(btrim(%1$I.niche_slug), '') IS NULL
-        OR NULLIF(btrim(%1$I.source_name), '') IS NULL
-        OR NULLIF(btrim(%1$I.source_id), '') IS NULL
+        OR (
+          (%1$I.category IS NULL OR btrim(%1$I.category) = '')
+          AND EXCLUDED.category IS NOT NULL
+        )
+        OR (NULLIF(btrim(%1$I.first_name), '') IS NULL AND EXCLUDED.first_name IS NOT NULL)
+        OR (NULLIF(btrim(%1$I.last_name), '') IS NULL AND EXCLUDED.last_name IS NOT NULL)
+        OR (NULLIF(btrim(%1$I.company), '') IS NULL AND EXCLUDED.company IS NOT NULL)
+        OR (NULLIF(btrim(%1$I.website), '') IS NULL AND EXCLUDED.website IS NOT NULL)
+        OR (NULLIF(btrim(%1$I.phone), '') IS NULL AND EXCLUDED.phone IS NOT NULL)
+        OR (NULLIF(btrim(%1$I.job_title), '') IS NULL AND EXCLUDED.job_title IS NOT NULL)
+        OR (NULLIF(btrim(%1$I.niche_slug), '') IS NULL AND EXCLUDED.niche_slug IS NOT NULL)
+        OR (NULLIF(btrim(%1$I.source_name), '') IS NULL AND EXCLUDED.source_name IS NOT NULL)
+        OR (NULLIF(btrim(%1$I.source_id), '') IS NULL AND EXCLUDED.source_id IS NOT NULL)
         OR EXISTS (
           SELECT 1
           FROM jsonb_each(COALESCE(EXCLUDED.payload, '{}'::jsonb)) AS e(key, value)
@@ -170,5 +228,10 @@ BEGIN
 END;
 $$;
 
+REVOKE ALL ON FUNCTION public.leads_note_instantly_id_skip(text, text) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION public.leads_note_instantly_id_skip(text, text) FROM anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.leads_note_instantly_id_skip(text, text) TO service_role;
+
 REVOKE ALL ON FUNCTION public.leads_upsert_uncleaned(jsonb, text, text) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION public.leads_upsert_uncleaned(jsonb, text, text) FROM anon, authenticated;
 GRANT EXECUTE ON FUNCTION public.leads_upsert_uncleaned(jsonb, text, text) TO service_role;

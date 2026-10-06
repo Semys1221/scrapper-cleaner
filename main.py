@@ -882,6 +882,11 @@ def enrich_phones_cmd(
         help="Call Outscraper and write phones. Omit to print the cost estimate only.",
     ),
     limit: int = typer.Option(1000, help="Maximum cleaned leads to consider."),
+    max_cost_usd: float = typer.Option(
+        10.0,
+        "--max-cost-usd",
+        help="Refuse --execute when the estimate is above this many USD.",
+    ),
     preset: str = typer.Option("", help="Preset id mapped to a one-word category."),
     fixture: str = typer.Option("", help="JSON fixture of cleaned leads. Skips the production table."),
     verify: bool = typer.Option(True, "--verify/--no-verify"),
@@ -889,7 +894,7 @@ def enrich_phones_cmd(
     """Retrieve verified phone numbers for cleaned leads. Does not run unless --execute."""
     from shared.phone_enrichment import cli_main
 
-    argv = ["--limit", str(limit)]
+    argv = ["--limit", str(limit), "--max-cost-usd", str(max_cost_usd)]
     if execute:
         argv.append("--execute")
     if preset:

@@ -64,13 +64,14 @@ ExecStart=/usr/bin/python3 main.py heal --preset avocats --stale-minutes 3
 
 ## Central leads and phone enrichment
 
-Scraped rows are upserted to Supabase `public.leads` (table owned by hercule.dev, `026_leads.sql`) with `status=uncleaned`, `source=scrape`, and a one-word `category` such as `PLOMBIER`. The unique key is the generated column `email_normalized`. A repeat scrape does not downgrade status, keeps an existing category, fills only empty phone, website, name, and company fields, and merges new `payload` keys (city, siret, naf, and the other registry fields) without replacing keys already set. Niche presets target 3,000 leads. Uncleaned leads are not pushed to Instantly unless `HERCULE_ALLOW_UNCLEANED_INSTANTLY_PUSH=1`.
+Scraped rows are upserted to Supabase `public.leads` (table owned by hercule.dev, `026_leads.sql`) with `status=uncleaned`, `source=scrape`, `status_source=list_payload`, and a one-word `category` such as `PLOMBIER`. The unique key is the generated column `email_normalized`. A repeat scrape does not downgrade status, keeps an existing category, fills only empty phone, website, name, and company fields, and merges new `payload` keys (city, siret, naf, and the other registry fields) without replacing keys already set. An identical re-scrape does not touch `updated_at`. When status moves up, `status_source` moves with it. The cleaner sets `status_source=manual`. Niche presets target 3,000 leads (`presets.yaml` is the source of truth; `configs/*_config.py` matches it, except `jum_advisory` at 500, `runbook_test` at 5,000, and `_adhoc` at 5,000). `courtiers_prevoyance_b2b` maps to `IAS`. `runbook_test` maps to `TEST`, not `COMPTABLE`. Uncleaned leads are not pushed to Instantly unless `HERCULE_ALLOW_UNCLEANED_INSTANTLY_PUSH=1`.
 
-After the cleaner marks rows `cleaned`, retrieve verified phones (no production run unless you pass `--execute`):
+After the cleaner marks rows `cleaned`, retrieve verified phones (no production run unless you pass `--execute`, and not when the estimate is above `--max-cost-usd`, default 10):
 
 ```bash
 python main.py enrich-phones --preset plombier --limit 1000
 python main.py enrich-phones --preset plombier --limit 1000 --execute
+python main.py enrich-phones --preset plombier --limit 1000 --execute --max-cost-usd 10
 ```
 
 Budget **$8 per 1,000 leads** at Outscraper medium-tier rates ($3 emails-and-contacts + $5 phones-enricher) when every lead needs a lookup and yields one number. The first 500 domains and 25 phones each month are free.

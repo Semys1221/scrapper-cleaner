@@ -80,6 +80,16 @@ class EnrichmentResult:
         }
 
 
+def format_usd(amount: float) -> str:
+    """2 to 4 decimal places so a one-lead estimate is not printed as $0.00."""
+    text = f"{float(amount):.4f}"
+    whole, frac = text.split(".")
+    frac = frac.rstrip("0")
+    if len(frac) < 2:
+        frac = frac.ljust(2, "0")
+    return f"{whole}.{frac}"
+
+
 def estimate_cost(lead_count: int, *, verify: bool = True, hit_rate: float = 1.0) -> dict[str, float]:
     """USD estimate for ``lead_count`` cleaned leads at published medium-tier rates."""
     count = max(int(lead_count), 0)
@@ -450,6 +460,20 @@ def enrich_cleaned_leads(
     return result
 
 
+DEFAULT_MAX_COST_USD = 10.0
+
+
+def assert_within_budget(cost: dict[str, float], max_cost_usd: float) -> None:
+    """Refuse a paid run when the estimate is above the hard cap."""
+    total = float(cost["total_usd"])
+    cap = float(max_cost_usd)
+    if total > cap:
+        raise SystemExit(
+            f"Refusing phone enrichment: estimated ${format_usd(total)} "
+            f"exceeds --max-cost-usd {format_usd(cap)}."
+        )
+
+
 def log_has_errors(lines: list[str]) -> list[str]:
     pattern = re.compile(r"\b(ERROR|Traceback|CRITICAL)\b")
     return [line for line in lines if pattern.search(line)]
@@ -464,6 +488,7 @@ def run_from_store(
     lookup: PhoneLookup | None,
     store: Any | None = None,
     log_cb: Callable[[str], None] | None = None,
+    max_cost_usd: float = DEFAULT_MAX_COST_USD,
 ) -> EnrichmentResult:
     target = store if store is not None else supabase_store_from_env()
     if target is None:
@@ -478,13 +503,23 @@ def run_from_store(
             result,
             (
                 f"Dry-run — {result.eligible} cleaned lead(s) would be enriched. "
-                f"Estimated cost ${cost['total_usd']:.2f} "
-                f"(retrieval ${cost['retrieval_usd']:.2f} + verification ${cost['verification_usd']:.2f}). "
+                f"Estimated cost ${format_usd(cost['total_usd'])} "
+                f"(retrieval ${format_usd(cost['retrieval_usd'])} + verification ${format_usd(cost['verification_usd'])}). "
                 "No Outscraper request was sent."
             ),
             log_cb,
         )
         return result
+    cost = estimate_cost(sum(1 for lead in candidates if needs_phone_enrichment(lead)), verify=verify)
+    assert_within_budget(cost, max_cost_usd)
+    _log(
+        EnrichmentResult(),
+        (
+            f"Estimated cost ${format_usd(cost['total_usd'])} "
+            f"(cap ${format_usd(max_cost_usd)})."
+        ),
+        log_cb,
+    )
     return enrich_cleaned_leads(
         candidates,
         lookup,
@@ -504,6 +539,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Call Outscraper and write phones. Without this flag the command only estimates cost.",
     )
     parser.add_argument("--limit", type=int, default=1000, help="Maximum cleaned leads to consider.")
+    parser.add_argument(
+        "--max-cost-usd",
+        type=float,
+        default=DEFAULT_MAX_COST_USD,
+        help="Refuse --execute when the estimate is above this many USD.",
+    )
     parser.add_argument(
         "--preset",
         default="",
@@ -594,14 +635,21 @@ def cli_main(argv: list[str] | None = None) -> int:
             if not isinstance(payload, list):
                 raise SystemExit("fixture must be a JSON list of lead objects")
             leads = _filter_fixture_category(payload, category)
+            if args.limit is not None:
+                leads = leads[: max(int(args.limit), 0)]
+            eligible = sum(1 for lead in leads if needs_phone_enrichment(lead))
+            cost = estimate_cost(eligible, verify=verify)
             if not args.execute:
-                eligible = sum(1 for lead in leads if needs_phone_enrichment(lead))
-                cost = estimate_cost(eligible, verify=verify)
                 _log(
-                    f"Dry-run fixture — {eligible} lead(s), estimated ${cost['total_usd']:.2f} "
+                    f"Dry-run fixture — {eligible} lead(s), estimated ${format_usd(cost['total_usd'])} "
                     "per the published medium-tier rate. No Outscraper request was sent."
                 )
             else:
+                assert_within_budget(cost, args.max_cost_usd)
+                _log(
+                    f"Estimated cost ${format_usd(cost['total_usd'])} "
+                    f"(cap ${format_usd(args.max_cost_usd)})."
+                )
                 api_key = os.getenv("OUTSCRAPER_API_KEY", "").strip()
                 if not api_key:
                     raise SystemExit("OUTSCRAPER_API_KEY is required for --execute")
@@ -617,6 +665,7 @@ def cli_main(argv: list[str] | None = None) -> int:
                 verify=verify,
                 lookup=lookup,
                 log_cb=_log,
+                max_cost_usd=args.max_cost_usd,
             )
     except SystemExit:
         raise

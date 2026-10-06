@@ -17,7 +17,6 @@ from __future__ import annotations
 import logging
 import os
 import re
-import unicodedata
 from datetime import datetime, timezone
 from typing import Any, Iterable, Protocol
 
@@ -31,6 +30,7 @@ LEADS_CONFLICT_TARGET = "email_normalized"
 LEADS_UPSERT_RPC = "leads_upsert_uncleaned"
 
 # Scraped rows record that this pipeline set the initial status.
+# The upsert RPC copies status_source only when lead_status_rank moves up.
 # The cleaner sets status_source to manual when it moves a row to cleaned.
 STATUS_SOURCE_LIST_PAYLOAD = "list_payload"
 STATUS_SOURCE_MANUAL = "manual"
@@ -49,6 +49,9 @@ LEAD_STATUSES = (
     STATUS_IN_CAMPAIGN,
     STATUS_INSTANTLY_LISTED,
 )
+
+# PostgREST puts .in_() filters in the request URL. ~200 emails stays under the limit.
+MARK_CLEANED_BATCH = 200
 
 STATUS_RANK = {status: index for index, status in enumerate(LEAD_STATUSES)}
 
@@ -79,8 +82,9 @@ PRESET_CATEGORY: dict[str, str] = {
     "chirurgiens_dentistes": "DENTISTE",
     "chirurgiens_plasticiens": "CHIRURGIEN",
     "conseillers_gestion_patrimoine": "CIF",
+    # COURTIER is mortgage brokers. Insurance intermediaries are IAS.
     "courtiers_credit_immobilier": "COURTIER",
-    "courtiers_prevoyance_b2b": "COURTIER",
+    "courtiers_prevoyance_b2b": "IAS",
     "daf_partage": "DAF",
     "dentistes_cabinet_groupe": "DENTISTE",
     "hotels_independants": "HOTEL",
@@ -97,7 +101,8 @@ PRESET_CATEGORY: dict[str, str] = {
     "plombier": "PLOMBIER",
     "plombiers": "PLOMBIER",
     "restaurants_independants": "RESTAURANT",
-    "runbook_test": "COMPTABLE",
+    # TEST is not a hercule niche. The runbook preset must not land in COMPTABLE.
+    "runbook_test": "TEST",
     "terrassement_vrd": "TERRASSEMENT",
     "veterinaires": "VETERINAIRE",
     "_adhoc": "ADHOC",
@@ -169,13 +174,14 @@ def utc_now() -> str:
 
 
 def category_for_preset(preset: str) -> str:
+    """Return the mapped category. Unknown presets raise; there is no last-word fallback."""
     key = (preset or "").strip().lower()
-    if key in PRESET_CATEGORY:
-        value = PRESET_CATEGORY[key]
-    else:
-        token = key.split("_")[-1] if key else ""
-        ascii_token = unicodedata.normalize("NFKD", token).encode("ascii", "ignore").decode("ascii")
-        value = "".join(ch for ch in ascii_token if ch.isalpha()).upper()
+    if key not in PRESET_CATEGORY:
+        raise ValueError(
+            f"Unknown preset {preset!r}. Add it to PRESET_CATEGORY before scraping. "
+            "Category must be one A-Z word matching hercule niche_mappings."
+        )
+    value = PRESET_CATEGORY[key]
     if not CATEGORY_RE.fullmatch(value):
         raise ValueError(
             f"category for preset {preset!r} must be one A-Z word, got {value!r}"
@@ -369,9 +375,10 @@ def _collapse_leads_by_email(
 
 
 def probe_leads_table(store: LeadsStore | None = None) -> None:
-    """Fail at startup when Supabase is configured but the leads table is missing.
+    """Fail before Outscraper spend when the table or the 027b upsert RPC is missing.
 
     Per-row writes still raise on their own. This only runs when credentials exist.
+    The RPC check is an empty-array call: it inserts nothing.
     """
     target = store if store is not None else supabase_store_from_env()
     if not isinstance(target, SupabaseLeadsStore):
@@ -380,7 +387,29 @@ def probe_leads_table(store: LeadsStore | None = None) -> None:
         target.client.table(target.table).select("email").limit(1).execute()
     except Exception as exc:
         logger.error("Central leads table %s is not readable: %s", target.table, exc)
-        raise
+        raise RuntimeError(
+            f"Central leads table {target.table} is not readable: {exc}"
+        ) from exc
+    try:
+        target.client.rpc(
+            LEADS_UPSERT_RPC,
+            {
+                "p_rows": [],
+                "p_conflict_target": LEADS_CONFLICT_TARGET,
+                "p_table": target.table,
+            },
+        ).execute()
+    except Exception as exc:
+        logger.error(
+            "Central leads upsert RPC %s is missing (apply 027b after 026): %s",
+            LEADS_UPSERT_RPC,
+            exc,
+        )
+        raise RuntimeError(
+            f"Central leads upsert RPC {LEADS_UPSERT_RPC} is not available. "
+            "Apply migrations/proposed/027b_leads_upsert_uncleaned.sql after 026 "
+            "before scraping or cleaning."
+        ) from exc
 
 
 def core_instantly_custom_variables(
@@ -546,23 +575,28 @@ class SupabaseLeadsStore:
         if not wanted:
             return {"updated": 0}
         now = utc_now()
-        # Exact equality on the generated email_normalized column.
-        response = (
-            self.client.table(self.table)
-            .update(
-                {
-                    "status": STATUS_CLEANED,
-                    "status_source": STATUS_SOURCE_MANUAL,
-                    "cleaned_at": now,
-                    "updated_at": now,
-                }
+        updated = 0
+        # Exact equality on email_normalized, in URL-sized chunks.
+        for start in range(0, len(wanted), MARK_CLEANED_BATCH):
+            chunk = wanted[start : start + MARK_CLEANED_BATCH]
+            response = (
+                self.client.table(self.table)
+                .update(
+                    {
+                        "status": STATUS_CLEANED,
+                        "status_source": STATUS_SOURCE_MANUAL,
+                        "cleaned_at": now,
+                        "updated_at": now,
+                    }
+                )
+                .in_("email_normalized", chunk)
+                .eq("status", STATUS_UNCLEANED)
+                .execute()
             )
-            .in_("email_normalized", wanted)
-            .eq("status", STATUS_UNCLEANED)
-            .execute()
-        )
-        data = response.data or []
-        return {"updated": len(data) if isinstance(data, list) else 0}
+            data = response.data or []
+            if isinstance(data, list):
+                updated += len(data)
+        return {"updated": updated}
 
     def list_phone_candidates(
         self, *, limit: int, category: str | None = None
@@ -605,14 +639,48 @@ class SupabaseLeadsStore:
         return {"updated": updated}
 
 
+_cached_store: SupabaseLeadsStore | None = None
+_cached_store_key: tuple[str, str, str] | None = None
+
+
+def reset_supabase_store_cache() -> None:
+    """Drop the process-wide client. Tests use this between env changes."""
+    global _cached_store, _cached_store_key
+    _cached_store = None
+    _cached_store_key = None
+
+
 def supabase_store_from_env() -> SupabaseLeadsStore | None:
+    """One Supabase client per process for the current URL, key, and table."""
+    global _cached_store, _cached_store_key
     url = os.getenv("SUPABASE_URL", "").strip() or os.getenv("NEXT_PUBLIC_SUPABASE_URL", "").strip()
     key = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "").strip()
     if not url or not key:
         return None
+    table = leads_table_name()
+    cache_key = (url, key, table)
+    if _cached_store is not None and _cached_store_key == cache_key:
+        return _cached_store
     from supabase import create_client
 
-    return SupabaseLeadsStore(create_client(url, key), leads_table_name())
+    store = SupabaseLeadsStore(create_client(url, key), table)
+    _cached_store = store
+    _cached_store_key = cache_key
+    return store
+
+
+def persist_scraped_leads(
+    rows: list[dict[str, Any]],
+    *,
+    preset: str,
+    store: LeadsStore | None = None,
+) -> dict[str, int]:
+    """Upsert a batch of scraped leads as uncleaned. No-op when Supabase is not configured."""
+    leads = [scraped_row_to_lead(row, preset=preset) for row in rows]
+    target = store if store is not None else supabase_store_from_env()
+    if target is None or not leads:
+        return {"inserted": 0, "updated": 0, "skipped": 0}
+    return target.upsert_uncleaned(leads)
 
 
 def persist_scraped_lead(
@@ -622,11 +690,7 @@ def persist_scraped_lead(
     store: LeadsStore | None = None,
 ) -> dict[str, int]:
     """Upsert one scraped lead as uncleaned. No-op when Supabase is not configured."""
-    lead = scraped_row_to_lead(row, preset=preset)
-    target = store if store is not None else supabase_store_from_env()
-    if target is None:
-        return {"inserted": 0, "updated": 0, "skipped": 0}
-    return target.upsert_uncleaned([lead])
+    return persist_scraped_leads([row], preset=preset, store=store)
 
 
 def mark_emails_cleaned(

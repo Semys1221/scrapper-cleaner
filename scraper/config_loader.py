@@ -173,6 +173,12 @@ def load_config(preset: str = DEFAULT_PRESET, *, require_keys: bool = True) -> d
 
     config = deepcopy(loader())
     config["PRESET_ID"] = preset
+    from shared.central_leads import category_for_preset
+
+    try:
+        config["LEAD_CATEGORY"] = category_for_preset(preset)
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
     for key, default in (
         ("OUTSCRAPER_BATCH_SIZE", 25),
         ("OUTSCRAPER_CONCURRENCY", 2),

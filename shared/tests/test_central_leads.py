@@ -29,6 +29,16 @@ def test_category_for_preset_matches_hercule_names() -> None:
     assert category_for_preset("architectes_dplg") == "ARCHITECTURE"
     assert category_for_preset("conseillers_gestion_patrimoine") == "CIF"
     assert category_for_preset("kinesitherapeutes") == "PARAMEDICAL"
+    assert category_for_preset("courtiers_credit_immobilier") == "COURTIER"
+    assert category_for_preset("courtiers_prevoyance_b2b") == "IAS"
+    assert category_for_preset("runbook_test") == "TEST"
+
+
+def test_unknown_preset_does_not_guess_a_category() -> None:
+    import pytest
+
+    with pytest.raises(ValueError, match="Unknown preset"):
+        category_for_preset("not_a_real_niche_plombier")
 
 
 def test_scraped_row_is_uncleaned() -> None:
@@ -233,7 +243,13 @@ def test_upsert_sql_matches_email_normalized_contract() -> None:
     insert_list = sql.split("INSERT INTO", 1)[1].split("SELECT", 1)[0]
     assert "email_normalized" not in insert_list
     for column in ("first_name", "last_name", "company", "website", "phone"):
-        assert f"NULLIF(btrim(%1$I.{column}), '')" in sql
+        assert f"NULLIF(btrim(%1$I.{column}), '') IS NULL AND EXCLUDED.{column} IS NOT NULL" in sql
+    assert "status_source = CASE" in sql
+    assert "leads_note_instantly_id_skip" in sql
+    assert (
+        "REVOKE EXECUTE ON FUNCTION public.leads_upsert_uncleaned(jsonb, text, text) "
+        "FROM anon, authenticated;"
+    ) in sql
     assert LEADS_CONFLICT_TARGET == "email_normalized"
 
 
@@ -324,6 +340,120 @@ def test_mark_cleaned_uses_exact_normalized_email() -> None:
     assert ("status", STATUS_UNCLEANED) in client.query.filters
     assert client.query.patch["status_source"] == "manual"
     assert client.query.patch["status"] == STATUS_CLEANED
+
+
+def test_mark_cleaned_batches_five_thousand_emails() -> None:
+    from shared.central_leads import MARK_CLEANED_BATCH
+
+    class _ChunkQuery:
+        def __init__(self, parent: "_ChunkClient") -> None:
+            self.parent = parent
+            self.values: list[str] = []
+
+        def update(self, patch: dict) -> "_ChunkQuery":
+            assert patch["status"] == STATUS_CLEANED
+            assert patch["status_source"] == "manual"
+            return self
+
+        def in_(self, key: str, values: list) -> "_ChunkQuery":
+            assert key == "email_normalized"
+            self.values = list(values)
+            return self
+
+        def eq(self, key: str, value: object) -> "_ChunkQuery":
+            assert (key, value) == ("status", STATUS_UNCLEANED)
+            return self
+
+        def execute(self) -> object:
+            self.parent.chunks.append(self.values)
+            return type("R", (), {"data": [{"id": email} for email in self.values]})()
+
+    class _ChunkClient:
+        def __init__(self) -> None:
+            self.chunks: list[list[str]] = []
+
+        def table(self, name: str) -> _ChunkQuery:
+            assert name == "leads"
+            return _ChunkQuery(self)
+
+    client = _ChunkClient()
+    store = SupabaseLeadsStore(client, "leads")
+    emails = [f"user{index}@ex.fr" for index in range(5000)]
+    stats = store.mark_cleaned(emails)
+    assert stats["updated"] == 5000
+    assert client.chunks
+    assert all(len(chunk) <= MARK_CLEANED_BATCH for chunk in client.chunks)
+    assert sum(len(chunk) for chunk in client.chunks) == 5000
+    assert len(client.chunks) == (5000 + MARK_CLEANED_BATCH - 1) // MARK_CLEANED_BATCH
+
+
+class _ProbeQuery:
+    def select(self, *_args: object, **_kwargs: object) -> "_ProbeQuery":
+        return self
+
+    def limit(self, _count: int) -> "_ProbeQuery":
+        return self
+
+    def execute(self) -> object:
+        return type("R", (), {"data": []})()
+
+
+class _ProbeClient:
+    def __init__(self, *, rpc_error: Exception | None = None) -> None:
+        self.rpc_error = rpc_error
+        self.rpc_calls: list[tuple[str, dict]] = []
+
+    def table(self, name: str) -> _ProbeQuery:
+        assert name == "leads"
+        return _ProbeQuery()
+
+    def rpc(self, name: str, params: dict) -> "_ProbeClient":
+        self.rpc_calls.append((name, params))
+        if self.rpc_error is not None:
+            raise self.rpc_error
+        return self
+
+    def execute(self) -> object:
+        return type("R", (), {"data": {"inserted": 0, "updated": 0}})()
+
+
+def test_probe_requires_upsert_rpc() -> None:
+    import pytest
+
+    from shared.central_leads import probe_leads_table
+
+    client = _ProbeClient()
+    probe_leads_table(SupabaseLeadsStore(client, "leads"))
+    assert client.rpc_calls == [
+        (
+            LEADS_UPSERT_RPC,
+            {"p_rows": [], "p_conflict_target": LEADS_CONFLICT_TARGET, "p_table": "leads"},
+        )
+    ]
+    missing = _ProbeClient(rpc_error=RuntimeError("function not found"))
+    with pytest.raises(RuntimeError, match="027b_leads_upsert_uncleaned"):
+        probe_leads_table(SupabaseLeadsStore(missing, "leads"))
+
+
+def test_supabase_client_is_reused(monkeypatch) -> None:
+    from shared.central_leads import reset_supabase_store_cache, supabase_store_from_env
+
+    created: list[object] = []
+
+    def fake_create(url: str, key: str) -> object:
+        client = object()
+        created.append((url, key, client))
+        return client
+
+    monkeypatch.setenv("SUPABASE_URL", "https://example.supabase.co")
+    monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", "service-role-key")
+    monkeypatch.setattr("supabase.create_client", fake_create)
+    reset_supabase_store_cache()
+    first = supabase_store_from_env()
+    second = supabase_store_from_env()
+    reset_supabase_store_cache()
+    assert first is second
+    assert len(created) == 1
 
 
 def test_instantly_custom_variables_drop_registry_fields() -> None:

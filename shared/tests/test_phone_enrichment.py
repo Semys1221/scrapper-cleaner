@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from shared.central_leads import STATUS_CLEANED, InMemoryLeadsStore
 from shared.phone_enrichment import (
     ERROR,
@@ -254,6 +256,47 @@ def test_paid_batch_is_persisted_before_later_outage(monkeypatch) -> None:
     assert not saved_second.get("phone_enriched_at")
     assert saved_second["phone_enrichment_status"] == ERROR
     assert needs_phone_enrichment(saved_second)
+
+
+def test_small_estimate_keeps_fractional_cents(capsys) -> None:
+    code = cli_main(["--fixture", str(FIXTURE), "--preset", "plombier", "--limit", "1"])
+    captured = capsys.readouterr()
+    assert code == 0
+    assert "estimated $0.008 per" in captured.out
+
+
+def test_limit_applies_to_fixture(tmp_path, capsys) -> None:
+    leads = [
+        {
+            "email": f"user{index}@ex.fr",
+            "website": f"https://user{index}.fr",
+            "category": "PLOMBIER",
+            "status": "cleaned",
+            "phone": "",
+        }
+        for index in range(3)
+    ]
+    path = tmp_path / "leads.json"
+    path.write_text(json.dumps(leads), encoding="utf-8")
+    code = cli_main(["--fixture", str(path), "--limit", "2"])
+    captured = capsys.readouterr()
+    assert code == 0
+    assert "Dry-run fixture — 2 lead(s)" in captured.out
+
+
+def test_execute_refuses_when_estimate_exceeds_cap() -> None:
+    with pytest.raises(SystemExit, match="exceeds --max-cost-usd"):
+        cli_main(
+            [
+                "--fixture",
+                str(FIXTURE),
+                "--preset",
+                "plombier",
+                "--execute",
+                "--max-cost-usd",
+                "0",
+            ]
+        )
 
 
 def test_fixture_preset_filters_by_category(capsys) -> None:

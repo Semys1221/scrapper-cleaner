@@ -113,15 +113,69 @@ def test_dry_run_log_has_no_errors(tmp_path: Path, monkeypatch: pytest.MonkeyPat
 def test_central_lead_write_failure_is_not_swallowed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("HERCULE_DATA_ROOT", str(tmp_path))
     activate_output_paths("plombier")
+    from core_logic import (
+        _active,
+        _append_lead_row,
+        _flush_pending_lead_rows_sync,
+        _reset_lead_save_buffer,
+        _retry_unpersisted_leads,
+        _sidecar_path,
+    )
 
-    def boom(_row: dict, *, preset: str) -> dict:
+    _reset_lead_save_buffer()
+
+    def boom(_rows: list, *, preset: str) -> dict:
         raise RuntimeError(f"schema mismatch for {preset}")
 
-    monkeypatch.setattr("shared.central_leads.persist_scraped_lead", boom)
-    from core_logic import _append_lead_row
-
+    monkeypatch.setattr("shared.central_leads.persist_scraped_leads", boom)
+    _append_lead_row({"Email": "a@ex.fr", "Company": "A"})
     with pytest.raises(RuntimeError, match="schema mismatch"):
-        _append_lead_row({"Email": "a@ex.fr", "Company": "A"})
+        _flush_pending_lead_rows_sync()
+    csv_path = Path(_active.csv)
+    if csv_path.exists():
+        assert "a@ex.fr" not in csv_path.read_text(encoding="utf-8")
+    sidecar = Path(_sidecar_path()).read_text(encoding="utf-8")
+    assert "a@ex.fr" in sidecar
+
+    def ok(rows: list, *, preset: str) -> dict:
+        assert preset == "plombier"
+        return {"inserted": len(rows), "updated": 0, "skipped": 0}
+
+    monkeypatch.setattr("shared.central_leads.persist_scraped_leads", ok)
+    _reset_lead_save_buffer()
+    asyncio.run(_retry_unpersisted_leads())
+    assert "a@ex.fr" in csv_path.read_text(encoding="utf-8")
+    assert not Path(_sidecar_path()).exists()
+
+
+def test_lead_saves_are_batched(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("HERCULE_DATA_ROOT", str(tmp_path))
+    activate_output_paths("plombier")
+    from core_logic import LEAD_SAVE_BATCH, _active, _append_lead_row, _reset_lead_save_buffer
+
+    _reset_lead_save_buffer()
+    calls: list[int] = []
+
+    def record(rows: list, *, preset: str) -> dict:
+        calls.append(len(rows))
+        return {"inserted": len(rows), "updated": 0, "skipped": 0}
+
+    monkeypatch.setattr("shared.central_leads.persist_scraped_leads", record)
+    for index in range(LEAD_SAVE_BATCH):
+        _append_lead_row({"Email": f"user{index}@ex.fr", "Company": "A"})
+    assert calls == [LEAD_SAVE_BATCH]
+    text = Path(_active.csv).read_text(encoding="utf-8")
+    assert "user0@ex.fr" in text
+    assert f"user{LEAD_SAVE_BATCH - 1}@ex.fr" in text
+
+
+def test_load_config_rejects_an_unmapped_preset(monkeypatch: pytest.MonkeyPatch) -> None:
+    from config_loader import load_config
+    from shared.central_leads import PRESET_CATEGORY
+
+    monkeypatch.delitem(PRESET_CATEGORY, "plombier")
+    with pytest.raises(SystemExit, match="Unknown preset"):
+        load_config("plombier", require_keys=False)
 
 
 def test_taxonomy_push_refuses_uncleaned_leads(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

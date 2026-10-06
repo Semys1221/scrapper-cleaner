@@ -517,21 +517,160 @@ def _csv_fieldnames(path: str) -> list[str]:
     return list(_CSV_COLUMNS)
 
 
-def _append_lead_row(row: dict[str, str]) -> None:
+# Supabase saves are batched so the async loop is not blocked on every row.
+# The leads CSV is written only after the batch upsert succeeds. Rows still
+# waiting live in pending_supabase.jsonl so a failed save is retried on resume
+# instead of being treated as already scraped.
+LEAD_SAVE_BATCH = 50
+_PENDING_LEAD_ROWS: list[dict[str, str]] = []
+
+
+def _reset_lead_save_buffer() -> None:
+    _PENDING_LEAD_ROWS.clear()
+
+
+def _sidecar_path() -> str:
+    return os.path.join(os.path.dirname(_active.csv), "pending_supabase.jsonl")
+
+
+def _public_lead_row(row: dict[str, Any]) -> dict[str, Any]:
+    return {key: value for key, value in row.items() if not str(key).startswith("_")}
+
+
+def _load_unpersisted_leads() -> list[dict[str, str]]:
+    path = _sidecar_path()
+    if not os.path.isfile(path):
+        return []
+    rows: list[dict[str, str]] = []
+    seen: set[str] = set()
+    with open(path, encoding="utf-8") as handle:
+        for line in handle:
+            text = line.strip()
+            if not text:
+                continue
+            item = json.loads(text)
+            if not isinstance(item, dict):
+                continue
+            email = str(item.get("Email") or "").strip().lower()
+            if email and email in seen:
+                continue
+            if email:
+                seen.add(email)
+            rows.append(item)
+    return rows
+
+
+def _rewrite_sidecar(rows: list[dict[str, Any]]) -> None:
+    path = _sidecar_path()
+    if not rows:
+        if os.path.isfile(path):
+            os.remove(path)
+        return
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as handle:
+        for row in rows:
+            handle.write(json.dumps(_public_lead_row(row), ensure_ascii=False) + "\n")
+
+
+def _append_sidecar(row: dict[str, Any]) -> None:
+    path = _sidecar_path()
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "a", encoding="utf-8") as handle:
+        handle.write(json.dumps(_public_lead_row(row), ensure_ascii=False) + "\n")
+
+
+def _write_csv_row(row: dict[str, str]) -> None:
     fieldnames = _csv_fieldnames(_active.csv)
     write_header = not os.path.exists(_active.csv) or os.path.getsize(_active.csv) == 0
-    with open(_active.csv, "a", encoding="utf-8", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
+    os.makedirs(os.path.dirname(_active.csv), exist_ok=True)
+    with open(_active.csv, "a", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames, extrasaction="ignore")
         if write_header:
             writer.writeheader()
         writer.writerow({col: row.get(col, "") for col in fieldnames})
-    from shared.central_leads import persist_scraped_lead
 
+
+def _persist_lead_batch(rows: list[dict[str, str]]) -> None:
+    from shared.central_leads import persist_scraped_leads
+
+    persist_scraped_leads(rows, preset=_active_preset)
+
+
+def _commit_saved_lead_rows(batch: list[dict[str, str]]) -> None:
+    """Write the CSV only after the Supabase upsert has returned."""
+    already, _domains = _load_seen_from_csv()
+    saved_emails: set[str] = set()
+    for row in batch:
+        email = str(row.get("Email") or "").strip().lower()
+        if email:
+            saved_emails.add(email)
+        if email and email in already:
+            continue
+        _write_csv_row(row)
+        if email:
+            already.add(email)
+    _PENDING_LEAD_ROWS[:] = [
+        row
+        for row in _PENDING_LEAD_ROWS
+        if str(row.get("Email") or "").strip().lower() not in saved_emails
+    ]
+    remaining = [
+        row
+        for row in _load_unpersisted_leads()
+        if str(row.get("Email") or "").strip().lower() not in saved_emails
+    ]
+    _rewrite_sidecar(remaining)
+
+
+def _flush_pending_lead_rows_sync() -> None:
+    if not _PENDING_LEAD_ROWS:
+        return
+    batch = list(_PENDING_LEAD_ROWS)
     try:
-        persist_scraped_lead(row, preset=_active_preset)
+        _persist_lead_batch(batch)
     except Exception as exc:
         logger.error("Central leads upsert failed: %s", exc)
         raise
+    _commit_saved_lead_rows(batch)
+
+
+async def _flush_pending_lead_rows_async() -> None:
+    """Upsert off the event loop, then write the CSV on success."""
+    if not _PENDING_LEAD_ROWS:
+        return
+    batch = list(_PENDING_LEAD_ROWS)
+    try:
+        await asyncio.to_thread(_persist_lead_batch, batch)
+    except Exception as exc:
+        logger.error("Central leads upsert failed: %s", exc)
+        raise
+    _commit_saved_lead_rows(batch)
+
+
+def _queue_lead_row_sync(row: dict[str, str]) -> None:
+    _PENDING_LEAD_ROWS.append(row)
+    _append_sidecar(row)
+    if len(_PENDING_LEAD_ROWS) >= LEAD_SAVE_BATCH:
+        _flush_pending_lead_rows_sync()
+
+
+async def _queue_lead_row_async(row: dict[str, str]) -> None:
+    _PENDING_LEAD_ROWS.append(row)
+    _append_sidecar(row)
+    if len(_PENDING_LEAD_ROWS) >= LEAD_SAVE_BATCH:
+        await _flush_pending_lead_rows_async()
+
+
+async def _retry_unpersisted_leads() -> None:
+    """Replay leads whose Supabase save failed on a previous run."""
+    if not _PENDING_LEAD_ROWS:
+        _PENDING_LEAD_ROWS.extend(_load_unpersisted_leads())
+    await _flush_pending_lead_rows_async()
+
+
+def _append_lead_row(row: dict[str, str]) -> None:
+    """Queue one lead. The CSV row is written when the Supabase batch succeeds."""
+    _queue_lead_row_sync(row)
 
 
 def _append_raw_business(business: dict[str, Any]) -> None:
@@ -1303,7 +1442,7 @@ async def _process_batch_results(
 
             seen_domain.add(_company_dedup_key(row["Website"], row["Email"]))
             seen_em.add(row["Email"])
-            _append_lead_row(row)
+            await _queue_lead_row_async(row)
             pending_scraped.append(row)
             leads_saved += 1
             metric_cb(leads_saved, leads_enriched_valid, instantly_pushed)
@@ -1812,6 +1951,8 @@ async def run_scraper_pipeline(
             )
             raise SystemExit(hint)
 
+    _reset_lead_save_buffer()
+    await _retry_unpersisted_leads()
     seen_em, seen_domain = _load_seen_from_csv()
     leads_saved = len(seen_em)
     if leads_saved:
@@ -2042,6 +2183,8 @@ async def run_scraper_pipeline(
 
     finally:
         await out_client.aclose()
+
+    await _flush_pending_lead_rows_async()
 
     if (enrich_enabled or bool(config.get("INGESTER_ENABLED", False))) and pending_scraped:
         label = "ingester" if config.get("INGESTER_ENABLED") else "enrich"
@@ -2504,6 +2647,12 @@ async def run_email_recovery(
 
     client = SdkOutscraperClient(api_key)
     activate_output_paths(preset or "biggy_agency")
+    _reset_lead_save_buffer()
+    if not dry_run:
+        from shared.central_leads import probe_leads_table
+
+        probe_leads_table()
+        await _retry_unpersisted_leads()
     seen_em, seen_domain = _load_seen_from_csv()
 
     pending_instantly: list[dict[str, str]] = []
@@ -2568,7 +2717,7 @@ async def run_email_recovery(
                 summary["accepted"] += 1
                 seen_em.add(row["Email"])
                 seen_domain.add(_company_dedup_key(row["Website"], row["Email"]))
-                _append_lead_row(row)
+                await _queue_lead_row_async(row)
                 accepted_rows.append(row)
                 if push_to_instantly:
                     pending_instantly.append(row)
@@ -2596,6 +2745,9 @@ async def run_email_recovery(
         summary["pushed"] += int(flush_stats.get("pushed", 0) or 0)
         summary["skipped_duplicate"] += int(flush_stats.get("skipped_duplicate", 0) or 0)
         summary["failed"] += int(flush_stats.get("failed", 0) or 0)
+
+    if not dry_run:
+        await _flush_pending_lead_rows_async()
 
     if not dry_run and unique:
         # Clear sidecar after a successful recovery pass

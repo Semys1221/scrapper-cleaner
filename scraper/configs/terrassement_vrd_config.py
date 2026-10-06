@@ -135,7 +135,7 @@ TERRASSEMENT_VRD_CONFIG = {
     "SCRAPE_RELOAD_START_GEO_PHASE": "pass",
     "SCRAPE_RELOAD_START_QUERY_PASS": 0,
     # ── Target / pipeline ─────────────────────────────────────────────────────
-    "TARGET_LEADS": 5000,
+    "TARGET_LEADS": 3000,
     "TARGET_MODE": "instantly_pushed",
     "SERVICE_DEFAULT": "Terrassement / VRD",
     "SERVICE_RULES": [],
