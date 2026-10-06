@@ -380,28 +380,45 @@ def _collapse_leads_by_email(
     return [pending[email] for email in order], skipped
 
 
-_SQLSTATE_RE = re.compile(r"\b(22[0-9A-Z]{3}|23514)\b", re.IGNORECASE)
+# Message text is not a SQLSTATE. Only an explicit SQLSTATE clause or an
+# ERROR: ... (22xxx) suffix counts, so "timed out after 22000 ms" and
+# "127.0.0.1:22001" stay transient.
+_SQLSTATE_MESSAGE_RE = re.compile(
+    r"SQLSTATE\s+(22[0-9A-Z]{3}|23514)\b|ERROR:.*\((22[0-9A-Z]{3}|23514)\)",
+    re.IGNORECASE,
+)
+
+
+def _structured_sqlstate(value: Any) -> str:
+    if value is None or isinstance(value, bool):
+        return ""
+    token = str(value).strip().upper()
+    if re.fullmatch(r"[0-9A-Z]{5}", token):
+        return token
+    return ""
 
 
 def postgres_sqlstate(exc: BaseException) -> str:
-    """Return a 5-character SQLSTATE from an API or driver error, if one is present."""
-    candidates: list[Any] = []
+    """Return a SQLSTATE from a structured code, or from an explicit message clause.
+
+    PostgREST sets ``code``. psycopg sets ``sqlstate``. A bare ``22xxx`` token in
+    a timeout or address is ignored.
+    """
     for attr in ("code", "sqlstate"):
-        value = getattr(exc, attr, None)
-        if value is not None:
-            candidates.append(value)
+        token = _structured_sqlstate(getattr(exc, attr, None))
+        if token:
+            return token
     if exc.args and isinstance(exc.args[0], dict):
         payload = exc.args[0]
-        candidates.append(payload.get("code"))
-        candidates.append(payload.get("sqlstate"))
-    for value in candidates:
-        if isinstance(value, bool):
-            continue
-        token = str(value).strip().upper()
-        if re.fullmatch(r"[0-9A-Z]{5}", token):
-            return token
-    match = _SQLSTATE_RE.search(f"{type(exc).__name__} {exc}")
-    return match.group(1).upper() if match else ""
+        for key in ("code", "sqlstate"):
+            token = _structured_sqlstate(payload.get(key))
+            if token:
+                return token
+    match = _SQLSTATE_MESSAGE_RE.search(str(exc))
+    if not match:
+        return ""
+    found = next(group for group in match.groups() if group)
+    return found.upper()
 
 
 def is_permanent_data_error(exc: BaseException) -> bool:

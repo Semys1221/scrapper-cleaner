@@ -369,11 +369,14 @@ def test_postgres_data_errors_move_to_rejected_sidecar(
         raise APIError({"message": "new row violates check constraint leads_category_check", "code": "23514"})
 
     monkeypatch.setattr("shared.central_leads.persist_scraped_leads", persist_check)
-    assert asyncio.run(_retry_unpersisted_leads()) is None
+    with pytest.raises(LeadPersistenceError, match="schema mismatch"):
+        asyncio.run(_retry_unpersisted_leads())
     rejected = Path(_rejected_sidecar_path()).read_text(encoding="utf-8")
     assert "wide@ex.fr" in rejected
     assert "23514" in rejected
     assert not sidecar.exists()
+    _reset_lead_save_buffer()
+    assert asyncio.run(_retry_unpersisted_leads()) is None
 
     _reset_lead_save_buffer()
     sidecar.write_text('{"Email": "unicode@ex.fr", "Company": "Unicode"}\n', encoding="utf-8")
@@ -382,7 +385,8 @@ def test_postgres_data_errors_move_to_rejected_sidecar(
         raise RuntimeError("unsupported Unicode escape sequence (SQLSTATE 22P05)")
 
     monkeypatch.setattr("shared.central_leads.persist_scraped_leads", persist_unicode)
-    assert asyncio.run(_retry_unpersisted_leads()) is None
+    with pytest.raises(LeadPersistenceError, match="schema mismatch"):
+        asyncio.run(_retry_unpersisted_leads())
     rejected = Path(_rejected_sidecar_path()).read_text(encoding="utf-8")
     assert "unicode@ex.fr" in rejected
     assert "22P05" in rejected
@@ -398,6 +402,225 @@ def test_postgres_data_errors_move_to_rejected_sidecar(
     with pytest.raises(LeadPersistenceError):
         asyncio.run(_retry_unpersisted_leads())
     assert "later@ex.fr" in sidecar.read_text(encoding="utf-8")
+
+
+def test_all_bad_batch_stops_the_run_without_more_outscraper_calls(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from postgrest.exceptions import APIError
+
+    monkeypatch.setenv("HERCULE_DATA_ROOT", str(tmp_path))
+    monkeypatch.delenv("SUPABASE_URL", raising=False)
+    monkeypatch.delenv("SUPABASE_SERVICE_ROLE_KEY", raising=False)
+    calls: list[list[str]] = []
+    attempts = {"n": 0}
+
+    async def fake_search(self, queries, limit, **kwargs):  # noqa: ANN001
+        calls.append(list(queries))
+        city = queries[0].split(" in ", 1)[1].split(",", 1)[0].lower()
+        return [
+            [
+                {
+                    "name": city,
+                    "site": f"https://{city}.fr",
+                    "email": f"{city}@ex.fr",
+                    "phone": "+33184801234",
+                    "place_id": city,
+                    "city": city,
+                    "type": "Plombier",
+                    "category": "Plumber",
+                }
+            ]
+        ]
+
+    def persist(rows: list, *, preset: str) -> dict:
+        del preset
+        attempts["n"] += 1
+        raise APIError({"message": "value too long for type character varying(320)", "code": "22001"})
+
+    monkeypatch.setattr("core_logic.OutscraperClient.google_maps_search_batch", fake_search)
+    monkeypatch.setattr("shared.central_leads.persist_scraped_leads", persist)
+    from core_logic import (
+        LeadRejectionStormError,
+        _rejected_sidecar_path,
+        _sidecar_path,
+        output_paths,
+        run_scraper_pipeline,
+    )
+
+    config = {
+        "TARGET_LEADS": 20,
+        "TARGET_MODE": "csv_saved",
+        "KEYWORDS": ["plombier"],
+        "LOCATIONS": ["Lyon", "Paris", "Lille", "Nice"],
+        "EXPANSION_KEYWORDS": [],
+        "EXPANSION_LOCATIONS": [],
+        "QUERY_PLANNER_USE_DEPARTMENTS": False,
+        "OUTSCRAPER_API_KEY": "test-key",
+        "OUTSCRAPER_BATCH_SIZE": 1,
+        "OUTSCRAPER_CONCURRENCY": 1,
+        "OUTSCRAPER_LIMIT_PER_QUERY": 5,
+        "EXCLUDE_DOMAINS": [],
+        "ENRICH_ENABLED": False,
+        "PRESET_ID": "plombier",
+        "SERVICE_DEFAULT": "Plomberie",
+        "SERVICE_RULES": [],
+    }
+    with pytest.raises(LeadRejectionStormError, match="schema mismatch"):
+        asyncio.run(
+            run_scraper_pipeline(
+                config,
+                log_cb=lambda _message: None,
+                progress_cb=lambda _progress: None,
+                metric_cb=lambda *_args: None,
+                dry_run=False,
+                push_to_instantly=False,
+                preset="plombier",
+            )
+        )
+    assert len(calls) == 1
+    assert "Lyon" in calls[0][0]
+    assert all("Paris" not in query and "Nice" not in query for batch in calls for query in batch)
+    paths = output_paths("plombier")
+    sidecar = Path(_sidecar_path())
+    assert not sidecar.exists()
+    rejected = Path(_rejected_sidecar_path()).read_text(encoding="utf-8")
+    assert rejected.count("@ex.fr") == len({query for batch in calls for query in batch})
+    state_path = Path(paths.scrape_state)
+    if state_path.exists():
+        state = state_path.read_text(encoding="utf-8")
+        assert '"slot_skips": {}' in state or '"slot_skips":{}' in state
+
+    from core_logic import MAX_SUPABASE_CALLS_PER_BATCH, _reset_lead_save_buffer, _retry_unpersisted_leads
+
+    _reset_lead_save_buffer()
+    attempts["n"] = 0
+    sidecar.parent.mkdir(parents=True, exist_ok=True)
+    lines = [f'{{"Email": "user{index}@ex.fr", "Company": "Co"}}' for index in range(50)]
+    sidecar.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    with pytest.raises(LeadRejectionStormError, match="schema mismatch"):
+        asyncio.run(_retry_unpersisted_leads())
+    assert attempts["n"] <= 8
+    assert attempts["n"] < MAX_SUPABASE_CALLS_PER_BATCH
+    rejected_lines = Path(_rejected_sidecar_path()).read_text(encoding="utf-8").splitlines()
+    rejected_emails = [line for line in rejected_lines if "user" in line and "@ex.fr" in line]
+    assert len(rejected_emails) == 50
+    assert not sidecar.exists()
+
+
+def test_concurrent_flushes_reject_each_email_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import time
+
+    from postgrest.exceptions import APIError
+
+    monkeypatch.setenv("HERCULE_DATA_ROOT", str(tmp_path))
+    from core_logic import (
+        _PENDING_LEAD_ROWS,
+        _append_sidecar,
+        _rejected_sidecar_path,
+        _reset_lead_save_buffer,
+        _flush_pending_lead_rows_async,
+        activate_output_paths,
+    )
+
+    activate_output_paths("plombier")
+    _reset_lead_save_buffer()
+    rows = [{"Email": f"ok{index}@ex.fr", "Company": "Ok"} for index in range(6)]
+    rows.append({"Email": "bad@ex.fr", "Company": "Bad"})
+    saved: list[str] = []
+
+    def persist(batch: list, *, preset: str) -> dict:
+        del preset
+        time.sleep(0.02)
+        emails = [str(row.get("Email") or "") for row in batch]
+        if "bad@ex.fr" in emails:
+            raise APIError({"message": "value too long", "code": "22001"})
+        saved.extend(emails)
+        return {"inserted": len(emails), "updated": 0, "skipped": 0}
+
+    monkeypatch.setattr("shared.central_leads.persist_scraped_leads", persist)
+    for row in rows:
+        _PENDING_LEAD_ROWS.append(row)
+        _append_sidecar(row)
+
+    async def _flush_together() -> None:
+        await asyncio.gather(
+            _flush_pending_lead_rows_async(),
+            _flush_pending_lead_rows_async(),
+            _flush_pending_lead_rows_async(),
+        )
+
+    asyncio.run(_flush_together())
+    assert sorted(saved) == sorted(f"ok{index}@ex.fr" for index in range(6))
+    assert saved.count("ok0@ex.fr") == 1
+    rejected_lines = [
+        line
+        for line in Path(_rejected_sidecar_path()).read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    assert len(rejected_lines) == 1
+    assert "bad@ex.fr" in rejected_lines[0]
+
+
+def test_reject_ratio_is_configurable(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from postgrest.exceptions import APIError
+
+    monkeypatch.setenv("HERCULE_DATA_ROOT", str(tmp_path))
+    monkeypatch.setenv("HERCULE_REJECT_STOP_RATIO", "0.20")
+    monkeypatch.setenv("HERCULE_REJECT_MIN_SAMPLE", "4")
+    from core_logic import (
+        LeadRejectionStormError,
+        _reset_lead_save_buffer,
+        _retry_unpersisted_leads,
+        _sidecar_path,
+        activate_output_paths,
+    )
+
+    activate_output_paths("plombier")
+    _reset_lead_save_buffer()
+    sidecar = Path(_sidecar_path())
+    sidecar.parent.mkdir(parents=True, exist_ok=True)
+    sidecar.write_text(
+        "\n".join(
+            [
+                '{"Email": "ok1@ex.fr", "Company": "A"}',
+                '{"Email": "bad1@ex.fr", "Company": "B"}',
+                '{"Email": "ok2@ex.fr", "Company": "C"}',
+                '{"Email": "bad2@ex.fr", "Company": "D"}',
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    def persist(rows: list, *, preset: str) -> dict:
+        del preset
+        emails = [str(row.get("Email") or "") for row in rows]
+        if any(email.startswith("bad") for email in emails):
+            raise APIError({"message": "check violation", "code": "23514"})
+        return {"inserted": len(rows), "updated": 0, "skipped": 0}
+
+    monkeypatch.setattr("shared.central_leads.persist_scraped_leads", persist)
+    with pytest.raises(LeadRejectionStormError, match="schema mismatch"):
+        asyncio.run(_retry_unpersisted_leads())
+
+    monkeypatch.setenv("HERCULE_REJECT_MIN_SAMPLE", "100")
+    _reset_lead_save_buffer()
+    sidecar.write_text(
+        "\n".join(
+            [
+                '{"Email": "ok3@ex.fr", "Company": "A"}',
+                '{"Email": "bad3@ex.fr", "Company": "B"}',
+                '{"Email": "ok4@ex.fr", "Company": "C"}',
+                '{"Email": "bad4@ex.fr", "Company": "D"}',
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    assert asyncio.run(_retry_unpersisted_leads()) is None
 
 
 def test_load_config_rejects_an_unmapped_preset(monkeypatch: pytest.MonkeyPatch) -> None:

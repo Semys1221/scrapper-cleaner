@@ -500,8 +500,14 @@ def test_postgres_data_errors_are_permanent() -> None:
     assert is_permanent_data_error(untranslatable)
     assert is_permanent_data_error(check)
     assert is_permanent_data_error(RuntimeError("ERROR: value too long (SQLSTATE 22001)"))
+    assert is_permanent_data_error(RuntimeError("ERROR: value too long for type character varying (22001)"))
+    assert postgres_sqlstate(type("PsycopgError", (Exception,), {"sqlstate": "22P05"})()) == "22P05"
     assert not is_permanent_data_error(unique)
     assert not is_permanent_data_error(RuntimeError("schema mismatch"))
+    assert not is_permanent_data_error(RuntimeError("timed out after 22000 ms"))
+    assert postgres_sqlstate(RuntimeError("timed out after 22000 ms")) == ""
+    assert not is_permanent_data_error(RuntimeError("connect failed 127.0.0.1:22001"))
+    assert postgres_sqlstate(RuntimeError("connect failed 127.0.0.1:22001")) == ""
 
 
 def test_supabase_client_is_reused(monkeypatch) -> None:
