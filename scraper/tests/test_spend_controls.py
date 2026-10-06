@@ -232,6 +232,169 @@ def test_target_stops_new_batches_within_concurrency(
     assert summary["leads_saved"] >= 1
 
 
+def test_target_100_never_saves_more_than_100_and_resume_keeps_budget(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`--target 100` is a lead cap, and resume keeps the cumulative dollar budget.
+
+    Concurrent batches used to each save a full target (600 persisted while the
+    summary said 100). A later run also used to open a fresh state at $0 when
+    the checkpoint had spend but the CSV was empty.
+    """
+    monkeypatch.setenv("HERCULE_DATA_ROOT", str(tmp_path))
+    monkeypatch.delenv("HERCULE_ALLOW_UNCLEANED_INSTANTLY_PUSH", raising=False)
+    persisted: list[str] = []
+
+    async def fake_search(self, queries, limit, **kwargs):  # noqa: ANN001
+        del self, kwargs
+        await asyncio.sleep(0.01)
+        found = []
+        for query in queries:
+            city = query.split(" in ", 1)[1].split(",", 1)[0]
+            found.append(
+                [
+                    _lead(f"{city}-{index}")
+                    for index in range(int(limit))
+                ]
+            )
+        return found
+
+    def persist(rows: list, *, preset: str) -> dict:
+        del preset
+        persisted.extend(str(row.get("Email") or "") for row in rows)
+        return {"inserted": len(rows), "updated": 0, "skipped": 0}
+
+    monkeypatch.setattr("core_logic.OutscraperClient.google_maps_search_batch", fake_search)
+    monkeypatch.setattr("shared.central_leads.persist_scraped_leads", persist)
+    from core_logic import output_paths, run_scraper_pipeline
+    from scrape_state import detect_recoverable_run, load_scrape_state, save_scrape_state
+
+    locations = [f"City{index:03d}" for index in range(40)]
+    config = _config(locations, concurrency=6, target=100, limit=25)
+    config["OUTSCRAPER_BATCH_SIZE"] = 4
+    config["TARGET_MODE"] = "instantly_pushed"
+    config["OUTSCRAPER_ENRICHMENT"] = ["leads_n_contacts"]
+    config["MAX_SCRAPE_COST_USD"] = 50
+    summary = asyncio.run(
+        run_scraper_pipeline(
+            config,
+            log_cb=lambda _message: None,
+            progress_cb=lambda _progress: None,
+            metric_cb=lambda *_args: None,
+            dry_run=False,
+            push_to_instantly=False,
+            preset="plombier",
+        )
+    )
+    assert summary["leads_saved"] <= 100
+    assert summary["leads_saved"] == 100
+    assert len(persisted) <= 100
+    assert len(set(persisted)) == summary["leads_saved"]
+
+    # Partial cap, then resume with a higher cap: only the remainder is spent.
+    persisted.clear()
+    calls = {"places": 0}
+
+    async def counting_search(self, queries, limit, **kwargs):  # noqa: ANN001
+        del self, kwargs
+        calls["places"] += len(queries) * int(limit)
+        found = []
+        for query in queries:
+            city = query.split(" in ", 1)[1].split(",", 1)[0]
+            found.append([_lead(city)])
+        return found
+
+    monkeypatch.setattr("core_logic.OutscraperClient.google_maps_search_batch", counting_search)
+    budget_config = _config(
+        [f"Town{index:03d}" for index in range(200)],
+        concurrency=1,
+        target=1000,
+        limit=1,
+    )
+    budget_config["OUTSCRAPER_BATCH_SIZE"] = 10
+    budget_config["OUTSCRAPER_ENRICHMENT"] = ["leads_n_contacts"]
+    budget_config["MAX_SCRAPE_COST_USD"] = 0.30
+    budget_config["PRESET_ID"] = "notaires"
+    first = asyncio.run(
+        run_scraper_pipeline(
+            budget_config,
+            log_cb=lambda _message: None,
+            progress_cb=lambda _progress: None,
+            metric_cb=lambda *_args: None,
+            dry_run=False,
+            push_to_instantly=False,
+            preset="notaires",
+        )
+    )
+    state_path = output_paths("notaires").scrape_state
+    charged = load_scrape_state(state_path)
+    assert charged is not None
+    places_before = int(charged["places_requested_total"])
+    spend_before = float(charged["spend_usd_total"])
+    assert places_before == 50
+    assert spend_before == pytest.approx(0.30)
+    assert first["leads_saved"] == 50
+    assert first["budget_exhausted"] is False
+
+    calls["places"] = 0
+    budget_config["MAX_SCRAPE_COST_USD"] = 0.60
+    resumed = asyncio.run(
+        run_scraper_pipeline(
+            budget_config,
+            log_cb=lambda _message: None,
+            progress_cb=lambda _progress: None,
+            metric_cb=lambda *_args: None,
+            dry_run=False,
+            push_to_instantly=False,
+            resume=True,
+            preset="notaires",
+        )
+    )
+    after = load_scrape_state(state_path)
+    assert after is not None
+    assert calls["places"] == 50
+    assert int(after["places_requested_total"]) == places_before + calls["places"]
+    assert float(after["spend_usd_total"]) == pytest.approx(0.60)
+    assert float(after["spend_usd_total"]) >= spend_before
+    assert resumed["leads_saved"] == 100
+    assert len(persisted) <= resumed["leads_saved"]
+
+    # Cap is fully used. Drop the CSV so the only record of spend is the
+    # checkpoint. Resume (what worker-loop does) must not start again at $0.
+    csv_path = output_paths("notaires").csv
+    if Path(csv_path).is_file():
+        Path(csv_path).unlink()
+    after["leads_saved"] = 0
+    after["status"] = "incomplete"
+    save_scrape_state(after, state_path)
+    recovery = detect_recoverable_run(
+        budget_config,
+        csv_path,
+        state_path=state_path,
+    )
+    assert recovery.has_leftover_work is True
+    assert recovery.can_resume is True
+    calls["places"] = 0
+    held = asyncio.run(
+        run_scraper_pipeline(
+            budget_config,
+            log_cb=lambda _message: None,
+            progress_cb=lambda _progress: None,
+            metric_cb=lambda *_args: None,
+            dry_run=False,
+            push_to_instantly=False,
+            resume=True,
+            preset="notaires",
+        )
+    )
+    held_state = load_scrape_state(state_path)
+    assert held_state is not None
+    assert calls["places"] == 0
+    assert held["budget_exhausted"] is True
+    assert int(held_state["places_requested_total"]) == 100
+    assert float(held_state["spend_usd_total"]) == pytest.approx(0.60)
+
+
 def test_cancel_does_not_start_a_queued_paid_call(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

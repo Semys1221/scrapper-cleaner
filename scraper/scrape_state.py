@@ -577,10 +577,21 @@ def detect_recoverable_run(
         and not config_fingerprint_compatible(str(state["config_fingerprint"]), config)
     )
 
+    recorded_spend = False
+    if state is not None:
+        try:
+            recorded_spend = float(state.get("spend_usd_total") or 0) > 0 or int(
+                state.get("places_requested_total") or 0
+            ) > 0
+        except (TypeError, ValueError):
+            recorded_spend = False
+    # Spend is part of the leftover. A later scrape or worker-loop iteration
+    # must resume this state instead of opening a fresh one at $0.
     has_leftover_work = (
         leads_saved > 0
         or inflight_count > 0
         or instantly_pushed > 0
+        or recorded_spend
         or (state is not None and state.get("status") == STATUS_RUNNING)
     )
 

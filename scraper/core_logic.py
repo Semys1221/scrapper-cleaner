@@ -283,6 +283,24 @@ def _optional_positive_int(config: dict, key: str) -> int | None:
     return value if value > 0 else None
 
 
+_SPEND_STATE_KEYS = (
+    "places_requested_total",
+    "spend_usd_total",
+    "spend_usd_today",
+    "spend_utc_day",
+    "email_recovery_spend_usd",
+)
+
+
+def _carry_recorded_spend(run_state: dict[str, Any], existing_state: dict[str, Any] | None) -> None:
+    """Keep the preset's cumulative Outscraper spend when a new state dict is built."""
+    if not existing_state:
+        return
+    for key in _SPEND_STATE_KEYS:
+        if key in existing_state and existing_state.get(key) not in (None, ""):
+            run_state[key] = existing_state[key]
+
+
 def scrape_spend_snapshot(run_state: dict[str, Any] | None) -> dict[str, float | int]:
     """Spend already charged on this preset's scrape state."""
     if not run_state:
@@ -2131,6 +2149,7 @@ async def _process_batch_results(
     batches_total: int,
     last_completed: int,
     on_progress_persist: Callable[[int, int, int], None] | None = None,
+    lead_tally: list[int] | None = None,
 ) -> tuple[int, int, int, int, bool]:
     log_cb("Applying scrape gates (email, website, dedup)...")
     raw_places = 0
@@ -2142,6 +2161,10 @@ async def _process_batch_results(
     taxonomy_hard_excluded = 0
     started = time.time()
     target_reached = False
+    # Shared with every in-flight batch. A local int would let each batch
+    # save a full target before the others observe it.
+    if lead_tally is None:
+        lead_tally = [int(leads_saved)]
 
     for query_result in results:
         b_list = query_result if isinstance(query_result, list) else [query_result]
@@ -2171,11 +2194,26 @@ async def _process_batch_results(
             if not row:
                 continue
 
+            email_key = row["Email"]
+            if email_key in seen_em:
+                continue
+            # Claim the slot before any await so concurrent batches cannot
+            # each save a full --target.
+            if _is_target_reached(
+                target=target,
+                target_mode=target_mode,
+                leads_saved=lead_tally[0],
+                instantly_pushed=instantly_pushed,
+                config=config,
+            ):
+                target_reached = True
+                break
+            lead_tally[0] += 1
+            leads_saved = lead_tally[0]
             seen_domain.add(_company_dedup_key(row["Website"], row["Email"]))
-            seen_em.add(row["Email"])
+            seen_em.add(email_key)
             await _queue_lead_row_async(row)
             pending_scraped.append(row)
-            leads_saved += 1
             metric_cb(leads_saved, leads_enriched_valid, instantly_pushed)
 
             (
@@ -2207,14 +2245,14 @@ async def _process_batch_results(
             if _is_target_reached(
                 target=target,
                 target_mode=target_mode,
-                leads_saved=leads_saved,
+                leads_saved=lead_tally[0],
                 instantly_pushed=instantly_pushed,
                 config=config,
             ):
                 target_reached = True
                 break
             if on_progress_persist:
-                on_progress_persist(leads_saved, leads_enriched_valid, instantly_pushed)
+                on_progress_persist(lead_tally[0], leads_enriched_valid, instantly_pushed)
         if target_reached:
             break
 
@@ -2232,7 +2270,7 @@ async def _process_batch_results(
             "taxonomy_mismatches": taxonomy_mismatches,
             "taxonomy_hard_excluded": taxonomy_hard_excluded,
             "taxonomy_trash_rate_pct": taxonomy_rate,
-            "leads_saved": leads_saved,
+            "leads_saved": lead_tally[0],
             "leads_enriched_valid": leads_enriched_valid,
             "leads_enriched_rejected": leads_enriched_rejected,
             "instantly_pushed": instantly_pushed,
@@ -2265,7 +2303,7 @@ async def _process_batch_results(
             f"({duplicate_rejects}/{accepted + rejected} = {rate:.0f}%)."
         )
     return (
-        leads_saved,
+        lead_tally[0],
         leads_enriched_valid,
         leads_enriched_rejected,
         instantly_pushed,
@@ -2336,6 +2374,7 @@ async def _run_planner_scrape(
     places_cap = int(spend["places"])
     usd_per_place = float(spend["usd_per_place"])
     places_reserved = 0
+    lead_tally = [int(leads_saved)]
     issued_limits: dict[int, int] = {}
     charged_batches: set[int] = set()
     out_filters = outscraper_filters(config)
@@ -2380,7 +2419,7 @@ async def _run_planner_scrape(
             if stopping or target_reached or _is_target_reached(
                 target=target,
                 target_mode=target_mode,
-                leads_saved=leads_saved,
+                leads_saved=lead_tally[0],
                 instantly_pushed=instantly_pushed,
                 config=config,
             ):
@@ -2461,6 +2500,7 @@ async def _run_planner_scrape(
                 batches_total=max(planner.total_slots(), 1),
                 last_completed=batch.batch_index,
                 on_progress_persist=_persist_now,
+                lead_tally=lead_tally,
             )
             await _flush_pending_lead_rows_async()
             planner.record_batch_result(
@@ -2514,7 +2554,7 @@ async def _run_planner_scrape(
             and not _is_target_reached(
                 target=target,
                 target_mode=target_mode,
-                leads_saved=leads_saved,
+                leads_saved=lead_tally[0],
                 instantly_pushed=instantly_pushed,
                 config=config,
             )
@@ -2571,7 +2611,7 @@ async def _run_planner_scrape(
             if target_reached or _is_target_reached(
                 target=target,
                 target_mode=target_mode,
-                leads_saved=leads_saved,
+                leads_saved=lead_tally[0],
                 instantly_pushed=instantly_pushed,
                 config=config,
             ):
@@ -2938,8 +2978,7 @@ async def run_scraper_pipeline(
             query_pass=initial_query_pass(config),
             last_completed_batch_index=-1,
         )
-        if existing_state and existing_state.get("email_recovery_spend_usd"):
-            run_state["email_recovery_spend_usd"] = float(existing_state["email_recovery_spend_usd"])
+        _carry_recorded_spend(run_state, existing_state)
         save_scrape_state(run_state, path=_active.scrape_state)
         log_cb(f"Resuming from CSV without checkpoint ({leads_saved} leads in CSV).")
     else:
@@ -2954,8 +2993,7 @@ async def run_scraper_pipeline(
             query_pass=initial_query_pass(config),
             last_completed_batch_index=-1,
         )
-        if existing_state and existing_state.get("email_recovery_spend_usd"):
-            run_state["email_recovery_spend_usd"] = float(existing_state["email_recovery_spend_usd"])
+        _carry_recorded_spend(run_state, existing_state)
         save_scrape_state(run_state, path=_active.scrape_state)
         start_pass = initial_query_pass(config)
         if start_pass > 0:
