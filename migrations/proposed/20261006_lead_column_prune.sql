@@ -33,10 +33,15 @@
 --   cleaned_at              timestamptz
 --   phone_enriched_at       timestamptz                       -- idempotency for Outscraper phone enrichment
 --   phone_enrichment_status text                              -- enriched | not_found | invalid
---   unique (email, category)
+--   unique on lower(trim(email))   -- hercule.dev 026_leads.sql; one row per person
+--
+-- Conflict (hercule.dev PR 192 / 026_leads.sql, unique on lower(trim(email))):
+--   never change status
+--   keep category unless it is null or blank
+--   fill phone, website, first_name, last_name, company only when empty
 --
 -- Writers:
---   scraper  -> insert/update while status = uncleaned (never downgrades)
+--   scraper  -> upsert on normalized email (never downgrades status)
 --   cleaner  -> status = cleaned, cleaned_at = now() where status = uncleaned
 --   phone enrichment -> phone, phone_enriched_at, phone_enrichment_status
 --     for status = cleaned and phone_enriched_at is null

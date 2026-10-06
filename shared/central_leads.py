@@ -5,6 +5,9 @@ This module does not create it. Scraped rows land as ``uncleaned``. The cleaner
 moves them to ``cleaned``. Only cleaned leads are pushed to Instantly.
 
 Category values are one ASCII word in capitals (``PLOMBIER``).
+Identity is the normalized email (``lower(trim(email))``), matching hercule.dev
+``db/migrations/026_leads.sql``. A second scrape of the same person does not
+create another row and does not change status or a category that is already set.
 """
 
 from __future__ import annotations
@@ -78,15 +81,8 @@ PRESET_CATEGORY: dict[str, str] = {
     "_adhoc": "ADHOC",
 }
 
-_CORE_MUTABLE = (
-    "first_name",
-    "last_name",
-    "company",
-    "website",
-    "phone",
-    "source",
-    "source_id",
-)
+# On conflict, only these empty fields are filled. Existing values stay.
+_FILL_IF_EMPTY = ("first_name", "last_name", "company", "website", "phone")
 
 
 def uncleaned_instantly_push_allowed() -> bool:
@@ -140,9 +136,14 @@ def _text(value: Any) -> str:
     return str(value).strip()
 
 
+def normalize_email(value: Any) -> str:
+    """``lower(trim(email))``, the unique key on ``public.leads``."""
+    return _text(value).lower()
+
+
 def scraped_row_to_lead(row: dict[str, Any], *, preset: str) -> dict[str, Any]:
     """Map a scraper CSV row onto the central leads contract."""
-    email = _text(row.get("Email") or row.get("email")).lower()
+    email = normalize_email(row.get("Email") or row.get("email"))
     if "@" not in email:
         raise ValueError("scraped lead is missing an email")
     now = utc_now()
@@ -172,7 +173,7 @@ def instantly_item_to_lead(item: dict[str, Any], *, category: str) -> dict[str, 
     """Map an Instantly lead payload onto an uncleaned central row."""
     if not CATEGORY_RE.fullmatch(category):
         raise ValueError(f"category must be one A-Z word, got {category!r}")
-    email = _text(item.get("email")).lower()
+    email = normalize_email(item.get("email"))
     if "@" not in email:
         return None
     payload = item.get("payload") if isinstance(item.get("payload"), dict) else {}
@@ -200,33 +201,22 @@ def instantly_item_to_lead(item: dict[str, Any], *, category: str) -> dict[str, 
 
 
 def merge_uncleaned(existing: dict[str, Any], incoming: dict[str, Any]) -> dict[str, Any]:
-    """Return a patch. Never downgrade status or overwrite an enriched phone."""
-    existing_status = str(existing.get("status") or STATUS_UNCLEANED)
-    if STATUS_RANK.get(existing_status, 0) > STATUS_RANK[STATUS_UNCLEANED]:
-        patch: dict[str, Any] = {}
-        if (
-            not _text(existing.get("phone"))
-            and incoming.get("phone")
-            and not existing.get("phone_enriched_at")
-        ):
-            patch["phone"] = incoming["phone"]
-        if not _text(existing.get("website")) and incoming.get("website"):
-            patch["website"] = incoming["website"]
-        if patch:
-            patch["updated_at"] = utc_now()
-        return patch
+    """Patch for a lead that already exists under the same normalized email.
 
-    patch = {}
-    for key in _CORE_MUTABLE:
+    Status is left untouched (never downgraded). Category is kept unless it is
+    null or blank. Phone, website, names, and company are filled only when the
+    stored value is empty.
+    """
+    patch: dict[str, Any] = {}
+    if not _text(existing.get("category")) and _text(incoming.get("category")):
+        patch["category"] = incoming["category"]
+    for key in _FILL_IF_EMPTY:
+        if _text(existing.get(key)):
+            continue
         incoming_value = incoming.get(key)
-        if key == "phone" and existing.get("phone_enriched_at"):
+        if not _text(incoming_value):
             continue
-        if incoming_value is None:
-            continue
-        if _text(incoming_value) == "" and _text(existing.get(key)):
-            continue
-        if existing.get(key) != incoming_value:
-            patch[key] = incoming_value
+        patch[key] = incoming_value
     if patch:
         patch["updated_at"] = utc_now()
     return patch
@@ -277,10 +267,10 @@ class LeadsStore(Protocol):
 
 
 class InMemoryLeadsStore:
-    """Fixture store keyed by (email, category)."""
+    """Fixture store keyed by normalized email."""
 
     def __init__(self) -> None:
-        self.rows: dict[tuple[str, str], dict[str, Any]] = {}
+        self.rows: dict[str, dict[str, Any]] = {}
         self._seq = 0
 
     def upsert_uncleaned(self, leads: list[dict[str, Any]]) -> dict[str, int]:
@@ -288,14 +278,18 @@ class InMemoryLeadsStore:
         updated = 0
         skipped = 0
         for lead in leads:
-            key = (lead["email"], lead["category"])
-            existing = self.rows.get(key)
+            email = normalize_email(lead.get("email"))
+            if "@" not in email:
+                skipped += 1
+                continue
+            stored = {**lead, "email": email}
+            existing = self.rows.get(email)
             if existing is None:
                 self._seq += 1
-                self.rows[key] = {**lead, "id": f"mem-{self._seq}"}
+                self.rows[email] = {**stored, "id": f"mem-{self._seq}"}
                 inserted += 1
                 continue
-            patch = merge_uncleaned(existing, lead)
+            patch = merge_uncleaned(existing, stored)
             if not patch:
                 skipped += 1
                 continue
@@ -304,7 +298,7 @@ class InMemoryLeadsStore:
         return {"inserted": inserted, "updated": updated, "skipped": skipped}
 
     def mark_cleaned(self, emails: Iterable[str]) -> dict[str, int]:
-        wanted = {email.strip().lower() for email in emails if email and "@" in email}
+        wanted = {normalize_email(email) for email in emails if "@" in normalize_email(email)}
         updated = 0
         now = utc_now()
         for row in self.rows.values():
@@ -334,8 +328,8 @@ class InMemoryLeadsStore:
     def save_phone_enrichment(self, leads: list[dict[str, Any]]) -> dict[str, int]:
         updated = 0
         for lead in leads:
-            key = (lead["email"], lead["category"])
-            existing = self.rows.get(key)
+            email = normalize_email(lead.get("email"))
+            existing = self.rows.get(email)
             if existing is None:
                 continue
             for field in (
@@ -359,16 +353,27 @@ class SupabaseLeadsStore:
         inserted = 0
         updated = 0
         skipped = 0
-        emails = sorted({lead["email"] for lead in leads})
-        existing_rows = self._select_emails(emails)
-        by_key = {(row["email"], row["category"]): row for row in existing_rows}
-        to_insert: list[dict[str, Any]] = []
+        prepared: list[dict[str, Any]] = []
         for lead in leads:
-            key = (lead["email"], lead["category"])
-            existing = by_key.get(key)
+            email = normalize_email(lead.get("email"))
+            if "@" not in email:
+                skipped += 1
+                continue
+            prepared.append({**lead, "email": email})
+        emails = sorted({lead["email"] for lead in prepared})
+        existing_rows = self._select_emails(emails)
+        by_email = {normalize_email(row.get("email")): row for row in existing_rows}
+        pending_insert: dict[str, dict[str, Any]] = {}
+        for lead in prepared:
+            email = lead["email"]
+            existing = by_email.get(email)
+            if existing is None and email in pending_insert:
+                patch = merge_uncleaned(pending_insert[email], lead)
+                if patch:
+                    pending_insert[email].update(patch)
+                continue
             if existing is None:
-                payload = {k: v for k, v in lead.items() if k != "id"}
-                to_insert.append(payload)
+                pending_insert[email] = {k: v for k, v in lead.items() if k != "id"}
                 continue
             patch = merge_uncleaned(existing, lead)
             if not patch:
@@ -380,32 +385,32 @@ class SupabaseLeadsStore:
                 .eq("id", existing["id"])
                 .execute()
             )
+            existing.update(patch)
             updated += 1
-        if to_insert:
-            self.client.table(self.table).insert(to_insert).execute()
-            inserted += len(to_insert)
+        if pending_insert:
+            self.client.table(self.table).insert(list(pending_insert.values())).execute()
+            inserted += len(pending_insert)
         return {"inserted": inserted, "updated": updated, "skipped": skipped}
 
     def mark_cleaned(self, emails: Iterable[str]) -> dict[str, int]:
-        wanted = sorted({email.strip().lower() for email in emails if email and "@" in email})
+        wanted = {normalize_email(email) for email in emails if "@" in normalize_email(email)}
         if not wanted:
             return {"updated": 0}
         now = utc_now()
-        response = (
-            self.client.table(self.table)
-            .update(
-                {
-                    "status": STATUS_CLEANED,
-                    "cleaned_at": now,
-                    "updated_at": now,
-                }
-            )
-            .in_("email", wanted)
-            .eq("status", STATUS_UNCLEANED)
-            .execute()
-        )
-        data = response.data or []
-        return {"updated": len(data) if isinstance(data, list) else 0}
+        patch = {
+            "status": STATUS_CLEANED,
+            "cleaned_at": now,
+            "updated_at": now,
+        }
+        updated = 0
+        for row in self._select_emails(sorted(wanted)):
+            if normalize_email(row.get("email")) not in wanted:
+                continue
+            if row.get("status") != STATUS_UNCLEANED or not row.get("id"):
+                continue
+            self.client.table(self.table).update(patch).eq("id", row["id"]).execute()
+            updated += 1
+        return {"updated": updated}
 
     def list_phone_candidates(
         self, *, limit: int, category: str | None = None
@@ -442,9 +447,12 @@ class SupabaseLeadsStore:
     def _select_emails(self, emails: list[str]) -> list[dict[str, Any]]:
         if not emails:
             return []
-        response = (
-            self.client.table(self.table).select("*").in_("email", emails).execute()
+        # Case-insensitive match so a row stored as Jean@x.fr collides with jean@x.fr.
+        # The table unique key is lower(trim(email)) (hercule.dev 026_leads.sql).
+        clauses = ",".join(
+            'email.ilike."' + email.replace('"', '""') + '"' for email in emails
         )
+        response = self.client.table(self.table).select("*").or_(clauses).execute()
         data = response.data or []
         return [row for row in data if isinstance(row, dict)]
 

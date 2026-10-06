@@ -124,7 +124,7 @@ def test_invalid_carrier_does_not_store_phone() -> None:
 
 def test_store_execute_skips_enriched_rows() -> None:
     store = InMemoryLeadsStore()
-    store.rows[("jean@dupont.fr", "PLOMBIER")] = _lead()
+    store.rows["jean@dupont.fr"] = _lead()
     lookup = FakeLookup()
     first = run_from_store(
         execute=True,
