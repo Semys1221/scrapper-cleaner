@@ -533,10 +533,15 @@ class LeadRejectionStormError(LeadPersistenceError):
 # (validation, email longer than 320, SQLSTATE class 22, check violation
 # 23514) is moved to pending_supabase.rejected.jsonl.
 #
-# An entire save batch of permanent data errors, or a run reject share above
-# HERCULE_REJECT_STOP_RATIO (default 20%) after HERCULE_REJECT_MIN_SAMPLE rows
-# (default 50), stops the scrape. Bisection of one batch is capped so a 50-row
-# failure cannot fan out into ~99 Supabase calls.
+# A row is rejected only after its own one-row request fails with a permanent
+# code. Untested rows stay in pending_supabase.jsonl; they are not rejects and
+# do not count toward HERCULE_REJECT_STOP_RATIO. One batch may spend at most
+# MAX_SUPABASE_CALLS_PER_BATCH Supabase calls, then a fresh window continues
+# if something was stored. If a window stores nothing, the scrape stops and
+# the untested rows remain in the retry file. The async flush lock is created
+# for the running loop: main()'s worker calls asyncio.run() more than once
+# in the same process, and a module-level asyncio.Lock() stays bound to the
+# first loop.
 LEAD_SAVE_BATCH = 50
 MAX_SUPABASE_CALLS_PER_BATCH = 16
 REJECT_STOP_RATIO = 0.20
@@ -550,12 +555,29 @@ _RUN_SAVED_EMAILS: set[str] = set()
 _RUN_SAVED = 0
 _RUN_REJECTED = 0
 _FLUSH_THREAD_LOCK = threading.Lock()
-_FLUSH_ASYNC_LOCK = asyncio.Lock()
+_FLUSH_ASYNC_LOCK: asyncio.Lock | None = None
+_FLUSH_ASYNC_LOCK_LOOP: asyncio.AbstractEventLoop | None = None
+
+
+def _install_flush_async_lock(loop: asyncio.AbstractEventLoop) -> asyncio.Lock:
+    global _FLUSH_ASYNC_LOCK, _FLUSH_ASYNC_LOCK_LOOP
+    _FLUSH_ASYNC_LOCK = asyncio.Lock()
+    _FLUSH_ASYNC_LOCK_LOOP = loop
+    return _FLUSH_ASYNC_LOCK
+
+
+def _flush_async_lock() -> asyncio.Lock:
+    """Return the flush lock for the running loop, creating it if needed."""
+    loop = asyncio.get_running_loop()
+    if _FLUSH_ASYNC_LOCK is None or _FLUSH_ASYNC_LOCK_LOOP is not loop:
+        return _install_flush_async_lock(loop)
+    return _FLUSH_ASYNC_LOCK
 
 
 def _reset_lead_save_buffer() -> None:
     global _COMMITTED_EMAILS, _COMMITTED_EMAILS_PATH, _REJECTED_INDEX_PATH
     global _RUN_SAVED, _RUN_REJECTED
+    global _FLUSH_ASYNC_LOCK, _FLUSH_ASYNC_LOCK_LOOP
     _PENDING_LEAD_ROWS.clear()
     _COMMITTED_EMAILS = None
     _COMMITTED_EMAILS_PATH = None
@@ -564,6 +586,14 @@ def _reset_lead_save_buffer() -> None:
     _RUN_SAVED_EMAILS.clear()
     _RUN_SAVED = 0
     _RUN_REJECTED = 0
+    _FLUSH_ASYNC_LOCK = None
+    _FLUSH_ASYNC_LOCK_LOOP = None
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = None
+    if loop is not None:
+        _install_flush_async_lock(loop)
 
 
 def _reject_stop_ratio() -> float:
@@ -799,16 +829,33 @@ def _reject_data_error_rows(rows: list[dict[str, Any]], exc: Exception) -> None:
     _drop_pending_rows(rows)
 
 
-def _unresolved_rows(batch: list[dict[str, str]]) -> list[dict[str, str]]:
-    _ensure_rejected_index()
-    committed = _committed_emails()
-    unresolved: list[dict[str, str]] = []
+def _rows_still_open(
+    batch: list[dict[str, str]],
+    done_saved: set[str],
+    done_bad: set[str],
+) -> list[dict[str, str]]:
+    """Rows this bisection has not saved or proven bad. Prior files do not count."""
+    open_rows: list[dict[str, str]] = []
     for row in batch:
         email = _row_email(row)
-        if email and (email in committed or email in _REJECTED_EMAILS):
+        if email and (email in done_saved or email in done_bad):
             continue
-        unresolved.append(row)
-    return unresolved
+        open_rows.append(row)
+    return open_rows
+
+
+def _remember_saved(rows: list[dict[str, str]], done_saved: set[str]) -> None:
+    for row in rows:
+        email = _row_email(row)
+        if email:
+            done_saved.add(email)
+
+
+def _remember_rejected(rows: list[dict[str, str]], done_bad: set[str]) -> None:
+    for row in rows:
+        email = _row_email(row)
+        if email:
+            done_bad.add(email)
 
 
 def _raise_mass_rejection(detail: str) -> None:
@@ -835,12 +882,28 @@ def _raise_if_run_reject_ratio() -> None:
         )
 
 
-def _clearly_all_bad(
+def _sqlstate_suffix(exc: Exception | None) -> str:
+    if exc is None:
+        return ""
+    from shared.central_leads import postgres_sqlstate
+
+    code = postgres_sqlstate(exc)
+    return f" (SQLSTATE {code})" if code else ""
+
+
+def _probe_permanent_failures(
     batch: list[dict[str, str]],
     budget: list[int],
+    done_saved: set[str],
+    done_bad: set[str],
     last_exc: list[Exception | None],
 ) -> bool:
-    """Probe the ends and the middle. All of them failing means the batch is bad."""
+    """Sample the ends and the middle, each as its own request.
+
+    A failure rejects that one row. A success commits it and proves the batch
+    is not all bad. True means every sample that ran failed, so a small batch
+    can be proven by testing the rest one row at a time.
+    """
     from shared.central_leads import is_permanent_data_error
 
     if len(batch) < 2:
@@ -849,12 +912,17 @@ def _clearly_all_bad(
     for index in (0, len(batch) // 2, len(batch) - 1):
         if index not in indexes:
             indexes.append(index)
+    tested = 0
     failures = 0
     for index in indexes:
+        row = batch[index]
+        email = _row_email(row)
+        if email and (email in done_saved or email in done_bad):
+            continue
         if budget[0] <= 0:
             return False
         budget[0] -= 1
-        row = batch[index]
+        tested += 1
         try:
             _persist_lead_batch([row])
         except Exception as exc:
@@ -862,29 +930,35 @@ def _clearly_all_bad(
                 _raise_persistence_error(exc)
             last_exc[0] = exc
             _reject_data_error_rows([row], exc)
+            _remember_rejected([row], done_bad)
             failures += 1
             continue
         _commit_saved_lead_rows([row])
+        _remember_saved([row], done_saved)
         return False
-    return failures >= 2
+    return tested > 0 and failures == tested
 
 
 def _save_with_budget(
     batch: list[dict[str, str]],
     budget: list[int],
+    done_saved: set[str],
+    done_bad: set[str],
     last_exc: list[Exception | None],
     *,
-    probe_all_bad: bool,
+    probe: bool,
 ) -> None:
-    """Upsert, splitting permanent data errors until the call budget runs out."""
+    """Upsert, splitting permanent data errors until the call budget runs out.
+
+    A row is rejected only when a one-row request fails with a permanent code.
+    Rows still untested when the budget hits zero stay in the retry file.
+    """
     from shared.central_leads import is_permanent_data_error
 
-    batch = _unresolved_rows(batch)
+    batch = _rows_still_open(batch, done_saved, done_bad)
     if not batch:
         return
     if budget[0] <= 0:
-        exc = last_exc[0] or RuntimeError("permanent data error")
-        _reject_data_error_rows(batch, exc)
         return
     budget[0] -= 1
     try:
@@ -895,38 +969,84 @@ def _save_with_budget(
         last_exc[0] = exc
         if len(batch) == 1:
             _reject_data_error_rows(batch, exc)
+            _remember_rejected(batch, done_bad)
             return
-        if probe_all_bad and _clearly_all_bad(batch, budget, last_exc):
-            _reject_data_error_rows(batch, exc)
+        if probe and _probe_permanent_failures(batch, budget, done_saved, done_bad, last_exc):
+            remaining = _rows_still_open(batch, done_saved, done_bad)
+            if remaining and len(remaining) <= budget[0]:
+                for row in remaining:
+                    _save_with_budget(
+                        [row],
+                        budget,
+                        done_saved,
+                        done_bad,
+                        last_exc,
+                        probe=False,
+                    )
+        remaining = _rows_still_open(batch, done_saved, done_bad)
+        if len(remaining) <= 1:
+            if remaining:
+                _save_with_budget(
+                    remaining,
+                    budget,
+                    done_saved,
+                    done_bad,
+                    last_exc,
+                    probe=False,
+                )
             return
-        mid = max(len(batch) // 2, 1)
-        _save_with_budget(batch[:mid], budget, last_exc, probe_all_bad=False)
-        _save_with_budget(batch[mid:], budget, last_exc, probe_all_bad=False)
+        mid = max(len(remaining) // 2, 1)
+        _save_with_budget(remaining[:mid], budget, done_saved, done_bad, last_exc, probe=False)
+        _save_with_budget(remaining[mid:], budget, done_saved, done_bad, last_exc, probe=False)
         return
     _commit_saved_lead_rows(batch)
+    _remember_saved(batch, done_saved)
 
 
 def _save_pending_batch(batch: list[dict[str, str]]) -> None:
-    """Upsert a batch. Stop when the batch, or the run, is a rejection storm."""
+    """Upsert a batch. Stop when nothing in the batch can be stored, or the run ratio trips.
+
+    Emails already in the CSV or in rejected.jsonl are sent again. Postgres
+    decides. A successful upsert drops the row from the retry file.
+    """
     if not batch:
         return
-    saved_before = _RUN_SAVED
-    rejected_before = _RUN_REJECTED
-    budget = [MAX_SUPABASE_CALLS_PER_BATCH]
+    pending = list(batch)
+    saved_at_start = _RUN_SAVED
+    rejected_at_start = _RUN_REJECTED
     last_exc: list[Exception | None] = [None]
-    _save_with_budget(batch, budget, last_exc, probe_all_bad=True)
-    saved = _RUN_SAVED - saved_before
-    rejected = _RUN_REJECTED - rejected_before
-    if rejected and saved == 0:
-        code = ""
-        if last_exc[0] is not None:
-            from shared.central_leads import postgres_sqlstate
-
-            code = postgres_sqlstate(last_exc[0])
-        suffix = f" (SQLSTATE {code})" if code else ""
+    while pending:
+        saved_before = _RUN_SAVED
+        rejected_before = _RUN_REJECTED
+        budget = [MAX_SUPABASE_CALLS_PER_BATCH]
+        done_saved: set[str] = set()
+        done_bad: set[str] = set()
+        _save_with_budget(pending, budget, done_saved, done_bad, last_exc, probe=True)
+        untested = _rows_still_open(pending, done_saved, done_bad)
+        saved = _RUN_SAVED - saved_before
+        rejected = _RUN_REJECTED - rejected_before
+        if not untested:
+            break
+        if (saved == 0 and rejected == 0) or len(untested) >= len(pending):
+            _raise_persistence_error(
+                last_exc[0] or RuntimeError("central leads upsert made no progress")
+            )
+        if saved == 0 and _RUN_SAVED == saved_at_start:
+            suffix = _sqlstate_suffix(last_exc[0])
+            proven = _RUN_REJECTED - rejected_at_start
+            _raise_mass_rejection(
+                f"Permanent data errors stopped the save{suffix} "
+                f"({proven} proven reject(s); {len(untested)} untested row(s) "
+                "remain in the retry file)."
+            )
+        pending = untested
+    total_saved = _RUN_SAVED - saved_at_start
+    total_rejected = _RUN_REJECTED - rejected_at_start
+    if total_saved == 0 and total_rejected:
+        suffix = _sqlstate_suffix(last_exc[0])
         _raise_mass_rejection(
             f"Every row in the save batch was rejected as a permanent data error{suffix} "
-            f"({rejected} row(s))."
+            f"({total_rejected} row(s))."
         )
     _raise_if_run_reject_ratio()
 
@@ -947,7 +1067,7 @@ def _flush_pending_lead_rows_sync() -> None:
 
 async def _flush_pending_lead_rows_async() -> None:
     """Upsert off the event loop. One flush owns the buffer at a time."""
-    async with _FLUSH_ASYNC_LOCK:
+    async with _flush_async_lock():
         if not _PENDING_LEAD_ROWS:
             return
         batch = _separate_permanent_rejects(list(_PENDING_LEAD_ROWS))
@@ -965,7 +1085,7 @@ def _queue_lead_row_sync(row: dict[str, str]) -> None:
 
 
 async def _queue_lead_row_async(row: dict[str, str]) -> None:
-    async with _FLUSH_ASYNC_LOCK:
+    async with _flush_async_lock():
         _PENDING_LEAD_ROWS.append(row)
         _append_sidecar(row)
         if len(_PENDING_LEAD_ROWS) >= LEAD_SAVE_BATCH:
