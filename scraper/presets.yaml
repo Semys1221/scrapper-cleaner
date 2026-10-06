@@ -56,7 +56,7 @@ presets:
       OUTSCRAPER_TOTAL_LIMIT_BUFFER: 8
       OUTSCRAPER_FILTERS:
       - operational_only
-      TARGET_LEADS: 5000
+      TARGET_LEADS: 3000
       TARGET_MODE: instantly_pushed
       SCRAPE_SKIP_PHASE_ENABLED: true
       SCRAPE_SKIP_SATURATION_TO_DEPARTMENT: true
@@ -965,7 +965,7 @@ presets:
       OUTSCRAPER_POLL_SLOW_S: 10
       OUTSCRAPER_POLL_TIMEOUT_S: 600
       OUTSCRAPER_TOTAL_LIMIT_BUFFER: 8
-      TARGET_LEADS: 5000
+      TARGET_LEADS: 3000
       TARGET_MODE: instantly_pushed
       SERVICE_DEFAULT: Outbound B2B
       SERVICE_RULES: []
@@ -1903,7 +1903,7 @@ presets:
       OUTSCRAPER_ENRICHMENT:
       - leads_n_contacts
       OUTSCRAPER_EMAIL_RECOVERY_ENABLED: true
-      TARGET_LEADS: 4000
+      TARGET_LEADS: 3000
       TARGET_MODE: instantly_pushed
       SERVICE_DEFAULT: Agence immobilière
       SERVICE_RULES: []
@@ -2803,7 +2803,7 @@ presets:
       OUTSCRAPER_ENRICHMENT:
       - leads_n_contacts
       OUTSCRAPER_EMAIL_RECOVERY_ENABLED: true
-      TARGET_LEADS: 10000
+      TARGET_LEADS: 3000
       TARGET_MODE: instantly_pushed
       SCRAPE_START_QUERY_PASS: 0
       SCRAPE_SKIP_PHASE_ENABLED: false
@@ -3721,7 +3721,7 @@ presets:
       OUTSCRAPER_ENRICHMENT:
       - leads_n_contacts
       OUTSCRAPER_EMAIL_RECOVERY_ENABLED: true
-      TARGET_LEADS: 2500
+      TARGET_LEADS: 3000
       TARGET_MODE: instantly_pushed
       SCRAPE_START_QUERY_PASS: 0
       SCRAPE_SKIP_PHASE_ENABLED: false
@@ -4651,7 +4651,7 @@ presets:
       OUTSCRAPER_ENRICHMENT:
       - leads_n_contacts
       OUTSCRAPER_EMAIL_RECOVERY_ENABLED: true
-      TARGET_LEADS: 4000
+      TARGET_LEADS: 3000
       TARGET_MODE: instantly_pushed
       SCRAPE_START_QUERY_PASS: 0
       SCRAPE_SKIP_PHASE_ENABLED: false
@@ -5570,7 +5570,7 @@ presets:
       OUTSCRAPER_TOTAL_LIMIT_BUFFER: 8
       OUTSCRAPER_FILTERS:
       - operational_only
-      TARGET_LEADS: 5000
+      TARGET_LEADS: 3000
       TARGET_MODE: instantly_pushed
       SCRAPE_SKIP_PHASE_ENABLED: true
       SCRAPE_SKIP_SATURATION_TO_DEPARTMENT: true
@@ -6583,7 +6583,7 @@ presets:
       SCRAPE_RELOAD_MAX_ROUNDS: 4
       SCRAPE_RELOAD_START_GEO_PHASE: pass
       SCRAPE_RELOAD_START_QUERY_PASS: 0
-      TARGET_LEADS: 100
+      TARGET_LEADS: 3000
       TARGET_MODE: instantly_pushed_run
       INSTANTLY_PUSH_EVERY: 25
       SERVICE_DEFAULT: BTP / rénovation
@@ -7493,7 +7493,7 @@ presets:
       OUTSCRAPER_ENRICHMENT:
       - leads_n_contacts
       OUTSCRAPER_EMAIL_RECOVERY_ENABLED: true
-      TARGET_LEADS: 2500
+      TARGET_LEADS: 3000
       TARGET_MODE: instantly_pushed
       SCRAPE_START_QUERY_PASS: 0
       SCRAPE_SKIP_PHASE_ENABLED: false
@@ -8445,7 +8445,7 @@ presets:
       OUTSCRAPER_ENRICHMENT:
       - leads_n_contacts
       OUTSCRAPER_EMAIL_RECOVERY_ENABLED: true
-      TARGET_LEADS: 15000
+      TARGET_LEADS: 3000
       TARGET_MODE: instantly_pushed
       SCRAPE_START_QUERY_PASS: 1
       SCRAPE_SKIP_PHASE_ENABLED: false
@@ -9356,7 +9356,7 @@ presets:
       OUTSCRAPER_POLL_SLOW_S: 10
       OUTSCRAPER_POLL_TIMEOUT_S: 600
       OUTSCRAPER_TOTAL_LIMIT_BUFFER: 8
-      TARGET_LEADS: 5000
+      TARGET_LEADS: 3000
       TARGET_MODE: instantly_pushed
       SCRAPE_START_QUERY_PASS: 1
       SERVICE_DEFAULT: Expertise comptable
@@ -10251,7 +10251,7 @@ presets:
       OUTSCRAPER_ENRICHMENT:
       - leads_n_contacts
       OUTSCRAPER_EMAIL_RECOVERY_ENABLED: true
-      TARGET_LEADS: 10000
+      TARGET_LEADS: 3000
       TARGET_MODE: instantly_pushed_run
       SCRAPE_START_QUERY_PASS: 0
       DUPLICATE_GEO_ADVANCE_RATE: 0.3
@@ -12303,7 +12303,7 @@ presets:
       OUTSCRAPER_ENRICHMENT:
       - leads_n_contacts
       OUTSCRAPER_EMAIL_RECOVERY_ENABLED: true
-      TARGET_LEADS: 4000
+      TARGET_LEADS: 3000
       TARGET_MODE: instantly_pushed_run
       SERVICE_DEFAULT: Centre dentaire
       SERVICE_RULES: []
@@ -13220,7 +13220,7 @@ presets:
       OUTSCRAPER_POLL_SLOW_S: 10
       OUTSCRAPER_POLL_TIMEOUT_S: 300
       OUTSCRAPER_TOTAL_LIMIT_BUFFER: 8
-      TARGET_LEADS: 4000
+      TARGET_LEADS: 3000
       TARGET_MODE: instantly_pushed_run
       INSTANTLY_PUSH_EVERY: 25
       SERVICE_DEFAULT: Chirurgie dentaire
@@ -14126,7 +14126,7 @@ presets:
       OUTSCRAPER_ENRICHMENT:
       - leads_n_contacts
       OUTSCRAPER_EMAIL_RECOVERY_ENABLED: true
-      TARGET_LEADS: 4000
+      TARGET_LEADS: 3000
       TARGET_MODE: instantly_pushed_run
       SERVICE_DEFAULT: Chirurgie plastique
       SERVICE_RULES: []
@@ -15001,7 +15001,7 @@ presets:
       OUTSCRAPER_POLL_SLOW_S: 10
       OUTSCRAPER_POLL_TIMEOUT_S: 600
       OUTSCRAPER_TOTAL_LIMIT_BUFFER: 8
-      TARGET_LEADS: 5000
+      TARGET_LEADS: 3000
       TARGET_MODE: instantly_pushed
       SERVICE_DEFAULT: Gestion de patrimoine
       SERVICE_RULES: []
@@ -15904,7 +15904,7 @@ presets:
       OUTSCRAPER_ENRICHMENT:
       - leads_n_contacts
       OUTSCRAPER_EMAIL_RECOVERY_ENABLED: true
-      TARGET_LEADS: 2500
+      TARGET_LEADS: 3000
       TARGET_MODE: instantly_pushed
       SCRAPE_START_QUERY_PASS: 0
       SCRAPE_SKIP_PHASE_ENABLED: false
@@ -16837,7 +16837,7 @@ presets:
       OUTSCRAPER_ENRICHMENT:
       - leads_n_contacts
       OUTSCRAPER_EMAIL_RECOVERY_ENABLED: true
-      TARGET_LEADS: 10000
+      TARGET_LEADS: 3000
       TARGET_MODE: instantly_pushed
       SCRAPE_START_QUERY_PASS: 0
       SCRAPE_SKIP_PHASE_ENABLED: false
@@ -17736,7 +17736,7 @@ presets:
       OUTSCRAPER_POLL_SLOW_S: 10
       OUTSCRAPER_POLL_TIMEOUT_S: 600
       OUTSCRAPER_TOTAL_LIMIT_BUFFER: 8
-      TARGET_LEADS: 5000
+      TARGET_LEADS: 3000
       TARGET_MODE: instantly_pushed
       SERVICE_DEFAULT: DAF temps partagé
       SERVICE_RULES: []
@@ -18651,7 +18651,7 @@ presets:
       OUTSCRAPER_ENRICHMENT:
       - leads_n_contacts
       OUTSCRAPER_EMAIL_RECOVERY_ENABLED: true
-      TARGET_LEADS: 4000
+      TARGET_LEADS: 3000
       TARGET_MODE: instantly_pushed_run
       SERVICE_DEFAULT: Cabinet dentaire
       SERVICE_RULES: []
@@ -19566,7 +19566,7 @@ presets:
       OUTSCRAPER_ENRICHMENT:
       - leads_n_contacts
       OUTSCRAPER_EMAIL_RECOVERY_ENABLED: true
-      TARGET_LEADS: 4000
+      TARGET_LEADS: 3000
       TARGET_MODE: instantly_pushed_run
       SERVICE_DEFAULT: Hôtellerie
       SERVICE_RULES: []
@@ -20467,7 +20467,7 @@ presets:
       OUTSCRAPER_ENRICHMENT:
       - leads_n_contacts
       OUTSCRAPER_EMAIL_RECOVERY_ENABLED: true
-      TARGET_LEADS: 2500
+      TARGET_LEADS: 3000
       TARGET_MODE: instantly_pushed
       SCRAPE_START_QUERY_PASS: 0
       SCRAPE_SKIP_PHASE_ENABLED: false
@@ -21393,7 +21393,7 @@ presets:
       OUTSCRAPER_ENRICHMENT:
       - leads_n_contacts
       OUTSCRAPER_EMAIL_RECOVERY_ENABLED: true
-      TARGET_LEADS: 2500
+      TARGET_LEADS: 3000
       TARGET_MODE: instantly_pushed
       SCRAPE_START_QUERY_PASS: 0
       SCRAPE_SKIP_PHASE_ENABLED: false
@@ -22440,7 +22440,7 @@ presets:
       OUTSCRAPER_ENRICHMENT:
       - leads_n_contacts
       OUTSCRAPER_EMAIL_RECOVERY_ENABLED: true
-      TARGET_LEADS: 10000
+      TARGET_LEADS: 3000
       TARGET_MODE: instantly_pushed
       SCRAPE_START_QUERY_PASS: 0
       SCRAPE_SKIP_PHASE_ENABLED: false
@@ -23341,7 +23341,7 @@ presets:
       OUTSCRAPER_POLL_SLOW_S: 10
       OUTSCRAPER_POLL_TIMEOUT_S: 600
       OUTSCRAPER_TOTAL_LIMIT_BUFFER: 8
-      TARGET_LEADS: 5000
+      TARGET_LEADS: 3000
       TARGET_MODE: instantly_pushed
       SERVICE_DEFAULT: Sécurité incendie
       SERVICE_RULES: []
@@ -24295,7 +24295,7 @@ presets:
       OUTSCRAPER_ENRICHMENT:
       - leads_n_contacts
       OUTSCRAPER_EMAIL_RECOVERY_ENABLED: true
-      TARGET_LEADS: 4000
+      TARGET_LEADS: 3000
       TARGET_MODE: instantly_pushed
       SERVICE_DEFAULT: Médecine esthétique
       SERVICE_RULES: []
@@ -25204,7 +25204,7 @@ presets:
       OUTSCRAPER_ENRICHMENT:
       - leads_n_contacts
       OUTSCRAPER_EMAIL_RECOVERY_ENABLED: true
-      TARGET_LEADS: 5000
+      TARGET_LEADS: 3000
       TARGET_MODE: instantly_pushed
       SCRAPE_START_QUERY_PASS: 0
       SCRAPE_SKIP_PHASE_ENABLED: false
@@ -26123,7 +26123,7 @@ presets:
       OUTSCRAPER_ENRICHMENT:
       - leads_n_contacts
       OUTSCRAPER_EMAIL_RECOVERY_ENABLED: true
-      TARGET_LEADS: 4000
+      TARGET_LEADS: 3000
       TARGET_MODE: instantly_pushed_run
       SCRAPE_START_QUERY_PASS: 0
       SCRAPE_SKIP_PHASE_ENABLED: false
@@ -27039,7 +27039,7 @@ presets:
       OUTSCRAPER_ENRICHMENT:
       - leads_n_contacts
       OUTSCRAPER_EMAIL_RECOVERY_ENABLED: true
-      TARGET_LEADS: 2500
+      TARGET_LEADS: 3000
       TARGET_MODE: instantly_pushed
       SCRAPE_START_QUERY_PASS: 0
       SCRAPE_SKIP_PHASE_ENABLED: false
@@ -27961,7 +27961,7 @@ presets:
       OUTSCRAPER_ENRICHMENT:
       - leads_n_contacts
       OUTSCRAPER_EMAIL_RECOVERY_ENABLED: true
-      TARGET_LEADS: 2500
+      TARGET_LEADS: 3000
       TARGET_MODE: instantly_pushed
       SCRAPE_START_QUERY_PASS: 0
       SCRAPE_SKIP_PHASE_ENABLED: false
@@ -28908,7 +28908,7 @@ presets:
       OUTSCRAPER_POLL_SLOW_S: 10
       OUTSCRAPER_POLL_TIMEOUT_S: 300
       OUTSCRAPER_TOTAL_LIMIT_BUFFER: 8
-      TARGET_LEADS: 100
+      TARGET_LEADS: 3000
       TARGET_MODE: instantly_pushed_run
       INSTANTLY_PUSH_EVERY: 25
       SERVICE_DEFAULT: Restauration
@@ -30729,7 +30729,7 @@ presets:
       SCRAPE_RELOAD_MAX_ROUNDS: 4
       SCRAPE_RELOAD_START_GEO_PHASE: pass
       SCRAPE_RELOAD_START_QUERY_PASS: 0
-      TARGET_LEADS: 5000
+      TARGET_LEADS: 3000
       TARGET_MODE: instantly_pushed
       SERVICE_DEFAULT: Terrassement / VRD
       SERVICE_RULES: []
@@ -31634,7 +31634,7 @@ presets:
       OUTSCRAPER_ENRICHMENT:
       - leads_n_contacts
       OUTSCRAPER_EMAIL_RECOVERY_ENABLED: true
-      TARGET_LEADS: 10000
+      TARGET_LEADS: 3000
       TARGET_MODE: instantly_pushed
       SCRAPE_START_QUERY_PASS: 0
       SCRAPE_SKIP_PHASE_ENABLED: false

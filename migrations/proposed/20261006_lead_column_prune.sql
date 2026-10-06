@@ -10,42 +10,17 @@
 -- This repository does not CREATE that table.
 
 -- ---------------------------------------------------------------------------
--- Central leads contract (hercule.dev owns the CREATE TABLE)
+-- Central leads contract: hercule.dev 026_leads.sql (final)
 -- ---------------------------------------------------------------------------
--- public.leads
---   id                      uuid primary key default gen_random_uuid()
---   email                   text not null
---   first_name              text not null default ''
---   last_name               text not null default ''
---   company                 text not null default ''
---   website                 text not null default ''          -- cleaned URL
---   phone                   text not null default ''
---   category                text not null                     -- one A-Z word, e.g. PLOMBIER
---   status                  text not null default 'uncleaned'
---     check (status in ('uncleaned','cleaned','in_campaign','instantly_listed'))
---   source                  text not null default 'outscraper'
---   source_id               text not null default ''
---   instantly_lead_id       text
---   instantly_list_id       text
---   list_id                 uuid                              -- lists feature; this pipeline leaves it null
---   created_at              timestamptz not null default now()
---   updated_at              timestamptz not null default now()
---   cleaned_at              timestamptz
---   phone_enriched_at       timestamptz                       -- idempotency for Outscraper phone enrichment
---   phone_enrichment_status text                              -- enriched | not_found | invalid
---   unique on lower(trim(email))   -- hercule.dev 026_leads.sql; one row per person
---
--- Conflict (hercule.dev PR 192 / 026_leads.sql, unique on lower(trim(email))):
---   never change status
---   keep category unless it is null or blank
---   fill phone, website, first_name, last_name, company only when empty
---
--- Writers:
---   scraper  -> upsert on normalized email (never downgrades status)
---   cleaner  -> status = cleaned, cleaned_at = now() where status = uncleaned
---   phone enrichment -> phone, phone_enriched_at, phone_enrichment_status
---     for status = cleaned and phone_enriched_at is null
---   hercule.dev -> in_campaign, instantly_listed, list_id
+-- Unique key: email_normalized GENERATED ALWAYS AS (lower(btrim(email))) STORED.
+-- This pipeline does not write email_normalized.
+-- Upsert: migrations/proposed/027b_leads_upsert_uncleaned.sql (apply after 026).
+--   ON CONFLICT (email_normalized)
+--   status moves only when lead_status_rank(incoming) is higher
+--   category kept unless null; empty name/company/website/phone filled
+--   payload JSONB merged, existing keys kept
+-- Scraped rows: source='scrape', source_name='outscraper', status_source='list_payload'
+-- Cleaner: status='cleaned', status_source='manual' where status is still uncleaned
 
 -- ---------------------------------------------------------------------------
 -- BEFORE: outreach_leads (871 rows on 2026-10-06)

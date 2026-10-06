@@ -4,10 +4,12 @@ The table itself is owned by hercule.dev (Lists tab, lifecycle after ``cleaned``
 This module does not create it. Scraped rows land as ``uncleaned``. The cleaner
 moves them to ``cleaned``. Only cleaned leads are pushed to Instantly.
 
-Category values are one ASCII word in capitals (``PLOMBIER``).
-Identity is the normalized email (``lower(trim(email))``), matching hercule.dev
-``db/migrations/026_leads.sql``. A second scrape of the same person does not
-create another row and does not change status or a category that is already set.
+Category values are one ASCII word in capitals (``PLOMBIER``). Identity is the
+generated column ``email_normalized`` (``lower(btrim(email))``) from hercule.dev
+``db/migrations/026_leads.sql``. This writer stores the normalized email and
+does not write ``email_normalized``. A second scrape of the same person does
+not create another row, does not downgrade status, and does not replace a
+category or payload key that is already set.
 """
 
 from __future__ import annotations
@@ -23,12 +25,18 @@ logger = logging.getLogger(__name__)
 
 LEADS_TABLE = "leads"
 
-# Single conflict target. hercule.dev PR 192 is still rewriting 026_leads.sql
-# (the previous head used UNIQUE(email, category_key)). Change only this string
-# when the final unique key lands. Expression indexes need both parenthesis pairs:
-# ON CONFLICT ((lower(trim(email)))).
-LEADS_CONFLICT_TARGET = "((lower(trim(email))))"
+# PostgREST on_conflict=email_normalized. The upsert RPC uses
+# ON CONFLICT (email_normalized). The column is generated; do not write it.
+LEADS_CONFLICT_TARGET = "email_normalized"
 LEADS_UPSERT_RPC = "leads_upsert_uncleaned"
+
+# Scraped rows record that this pipeline set the initial status.
+# The cleaner sets status_source to manual when it moves a row to cleaned.
+STATUS_SOURCE_LIST_PAYLOAD = "list_payload"
+STATUS_SOURCE_MANUAL = "manual"
+SOURCE_SCRAPE = "scrape"
+SOURCE_INSTANTLY_IMPORT = "instantly_import"
+SOURCE_NAME_OUTSCRAPER = "outscraper"
 
 STATUS_UNCLEANED = "uncleaned"
 STATUS_CLEANED = "cleaned"
@@ -49,33 +57,37 @@ INSTANTLY_CUSTOM_ALLOWLIST = ("phone", "category", "status", "cleaned")
 
 CATEGORY_RE = re.compile(r"^[A-Z]{2,32}$")
 
-# Preset id -> one-word category. Unknown presets fall back to the last token.
+# Preset id -> one-word category. Names that hercule already uses are taken
+# from its niche_mappings. New niches (PLOMBIER, and a few presets with no
+# hercule equivalent) stay as their own A-Z word.
+# conseillers_gestion_patrimoine is CIF: hercule has no PATRIMOINE category.
+# kinesitherapeutes is PARAMEDICAL, the hercule bucket for that profession.
 PRESET_CATEGORY: dict[str, str] = {
     "agences_ecommerce": "ECOMMERCE",
     "agences_growth_outbound": "GROWTH",
     "agences_immobilieres": "IMMOBILIER",
-    "architectes_dplg": "ARCHITECTE",
+    "architectes_dplg": "ARCHITECTURE",
     "auto_ecoles": "AUTOECOLE",
     "avocats": "AVOCAT",
     "boutiques_ecommerce": "ECOMMERCE",
     "btp_pme": "BTP",
     "cabinets_conseil_pme": "CONSEIL",
-    "cabinets_conseiller_financier": "FINANCE",
+    "cabinets_conseiller_financier": "CIF",
     "cabinets_expertise_comptable": "COMPTABLE",
     "cabinets_expertise_comptable_fresh_geo": "COMPTABLE",
     "centres_dentaires_independants": "DENTISTE",
     "chirurgiens_dentistes": "DENTISTE",
     "chirurgiens_plasticiens": "CHIRURGIEN",
-    "conseillers_gestion_patrimoine": "PATRIMOINE",
+    "conseillers_gestion_patrimoine": "CIF",
     "courtiers_credit_immobilier": "COURTIER",
     "courtiers_prevoyance_b2b": "COURTIER",
     "daf_partage": "DAF",
     "dentistes_cabinet_groupe": "DENTISTE",
     "hotels_independants": "HOTEL",
     "infogerance_it_pme": "INFOGERANCE",
-    "installateurs_pac_rge": "PAC",
+    "installateurs_pac_rge": "CLIM",
     "jum_advisory": "CONSEIL",
-    "kinesitherapeutes": "KINE",
+    "kinesitherapeutes": "PARAMEDICAL",
     "maintenance_securite_incendie": "SECURITE",
     "medecine_esthetique": "ESTHETIQUE",
     "medecins_generalistes": "MEDECIN",
@@ -91,8 +103,41 @@ PRESET_CATEGORY: dict[str, str] = {
     "_adhoc": "ADHOC",
 }
 
+# Registry and Google fields that are not columns on public.leads.
+_PAYLOAD_FIELDS = (
+    ("City", "city"),
+    ("Service", "service"),
+    ("Niche", "niche"),
+    ("Subniche", "subniche"),
+    ("Type", "type"),
+    ("Category", "google_category"),
+    ("Subtypes", "subtypes"),
+    ("Siret", "siret"),
+    ("Siren", "siren"),
+    ("Effectif", "effectif"),
+    ("TrancheEffectif", "tranche_effectif"),
+    ("Naf", "naf"),
+    ("FormeJuridique", "forme_juridique"),
+    ("AnneeCreation", "annee_creation"),
+    ("ChiffreAffaires", "chiffre_affaires"),
+    ("TailleEntreprise", "taille_entreprise"),
+    ("LeadScore", "lead_score"),
+    ("RegistrySource", "registry_source"),
+    ("RegistryFetchedAt", "registry_fetched_at"),
+)
+
 # On conflict, only these empty fields are filled. Existing values stay.
-_FILL_IF_EMPTY = ("first_name", "last_name", "company", "website", "phone")
+_FILL_IF_EMPTY = (
+    "first_name",
+    "last_name",
+    "company",
+    "website",
+    "phone",
+    "job_title",
+    "niche_slug",
+    "source_name",
+    "source_id",
+)
 
 
 class InstantlyUncleanedPushError(RuntimeError):
@@ -161,8 +206,44 @@ def _text(value: Any) -> str:
 
 
 def normalize_email(value: Any) -> str:
-    """``lower(trim(email))``, the unique key on ``public.leads``."""
+    """``lower(btrim(email))``, stored in ``email`` and generated as ``email_normalized``."""
     return _text(value).lower()
+
+
+def payload_from_row(row: dict[str, Any]) -> dict[str, str]:
+    """Extra scraped attributes for ``leads.payload``. Empty values are omitted."""
+    payload: dict[str, str] = {}
+    for source_key, dest_key in _PAYLOAD_FIELDS:
+        value = _text(row.get(source_key)) or _text(row.get(dest_key))
+        if value:
+            payload[dest_key] = value
+    extra = row.get("payload")
+    if isinstance(extra, dict):
+        for key, value in extra.items():
+            text = _text(value)
+            if text and str(key) not in payload:
+                payload[str(key)] = text
+    return payload
+
+
+def merge_payload(existing: Any, incoming: Any) -> dict[str, Any]:
+    """Fill missing payload keys. A key that already has a value is kept."""
+    base = dict(existing) if isinstance(existing, dict) else {}
+    extra = incoming if isinstance(incoming, dict) else {}
+    for key, value in extra.items():
+        if value is None:
+            continue
+        if isinstance(value, str) and not value.strip():
+            continue
+        current = base.get(key)
+        if current is None or (isinstance(current, str) and not current.strip()):
+            base[str(key)] = value
+    return base
+
+
+def _niche_slug(preset: str) -> str:
+    slug = (preset or "").strip().lower()
+    return slug[:64]
 
 
 def scraped_row_to_lead(row: dict[str, Any], *, preset: str) -> dict[str, Any]:
@@ -178,13 +259,18 @@ def scraped_row_to_lead(row: dict[str, Any], *, preset: str) -> dict[str, Any]:
         "company": _text(row.get("Company") or row.get("company") or row.get("company_name")),
         "website": _text(row.get("Website") or row.get("website")),
         "phone": normalize_phone(row.get("Phone") or row.get("phone")),
+        "job_title": _text(row.get("JobTitle") or row.get("job_title")),
         "category": category_for_preset(preset),
-        "status": STATUS_UNCLEANED,
-        "source": "outscraper",
+        "niche_slug": _niche_slug(preset),
+        "source_name": SOURCE_NAME_OUTSCRAPER,
+        "source": SOURCE_SCRAPE,
         "source_id": _text(row.get("PlaceId") or row.get("source_id") or row.get("place_id")),
+        "status": STATUS_UNCLEANED,
+        "status_source": STATUS_SOURCE_LIST_PAYLOAD,
         "instantly_lead_id": None,
         "instantly_list_id": None,
         "list_id": None,
+        "payload": payload_from_row(row),
         "created_at": now,
         "updated_at": now,
         "cleaned_at": None,
@@ -200,22 +286,28 @@ def instantly_item_to_lead(item: dict[str, Any], *, category: str) -> dict[str, 
     email = normalize_email(item.get("email"))
     if "@" not in email:
         return None
-    payload = item.get("payload") if isinstance(item.get("payload"), dict) else {}
+    raw_payload = item.get("payload") if isinstance(item.get("payload"), dict) else {}
     now = utc_now()
+    payload = payload_from_row(raw_payload)
     return {
         "email": email,
         "first_name": _text(item.get("first_name")),
         "last_name": _text(item.get("last_name")),
-        "company": _text(item.get("company_name") or payload.get("companyName")),
-        "website": _text(item.get("website") or payload.get("website")),
-        "phone": normalize_phone(item.get("phone") or payload.get("phone")),
+        "company": _text(item.get("company_name") or raw_payload.get("companyName")),
+        "website": _text(item.get("website") or raw_payload.get("website")),
+        "phone": normalize_phone(item.get("phone") or raw_payload.get("phone")),
+        "job_title": _text(item.get("job_title") or raw_payload.get("jobTitle")),
         "category": category,
-        "status": STATUS_UNCLEANED,
-        "source": "instantly",
+        "niche_slug": "",
+        "source_name": "instantly",
+        "source": SOURCE_INSTANTLY_IMPORT,
         "source_id": _text(item.get("id")),
+        "status": STATUS_UNCLEANED,
+        "status_source": STATUS_SOURCE_LIST_PAYLOAD,
         "instantly_lead_id": _text(item.get("id")) or None,
         "instantly_list_id": None,
         "list_id": None,
+        "payload": payload,
         "created_at": now,
         "updated_at": now,
         "cleaned_at": None,
@@ -227,9 +319,11 @@ def instantly_item_to_lead(item: dict[str, Any], *, category: str) -> dict[str, 
 def merge_uncleaned(existing: dict[str, Any], incoming: dict[str, Any]) -> dict[str, Any]:
     """Patch for a lead that already exists under the same normalized email.
 
-    Status is left untouched (never downgraded). Category is kept unless it is
-    null or blank. Phone, website, names, and company are filled only when the
-    stored value is empty.
+    Status is left untouched here. The SQL upsert uses ``lead_status_rank`` so
+    a higher status can replace a lower one and a lower one cannot. Category is
+    kept unless it is null or blank. Phone, website, names, company, job title,
+    niche, and source name are filled only when the stored value is empty.
+    Payload keys already set are kept.
     """
     patch: dict[str, Any] = {}
     if not _text(existing.get("category")) and _text(incoming.get("category")):
@@ -241,6 +335,9 @@ def merge_uncleaned(existing: dict[str, Any], incoming: dict[str, Any]) -> dict[
         if not _text(incoming_value):
             continue
         patch[key] = incoming_value
+    merged = merge_payload(existing.get("payload"), incoming.get("payload"))
+    if merged and merged != (existing.get("payload") or {}):
+        patch["payload"] = merged
     if patch:
         patch["updated_at"] = utc_now()
     return patch
@@ -368,6 +465,7 @@ class InMemoryLeadsStore:
         for row in self.rows.values():
             if row["email"] in wanted and row.get("status") == STATUS_UNCLEANED:
                 row["status"] = STATUS_CLEANED
+                row["status_source"] = STATUS_SOURCE_MANUAL
                 row["cleaned_at"] = now
                 row["updated_at"] = now
                 updated += 1
@@ -448,17 +546,18 @@ class SupabaseLeadsStore:
         if not wanted:
             return {"updated": 0}
         now = utc_now()
-        # Exact equality on the normalized email. ilike would treat _ and % as wildcards.
+        # Exact equality on the generated email_normalized column.
         response = (
             self.client.table(self.table)
             .update(
                 {
                     "status": STATUS_CLEANED,
+                    "status_source": STATUS_SOURCE_MANUAL,
                     "cleaned_at": now,
                     "updated_at": now,
                 }
             )
-            .in_("email", wanted)
+            .in_("email_normalized", wanted)
             .eq("status", STATUS_UNCLEANED)
             .execute()
         )

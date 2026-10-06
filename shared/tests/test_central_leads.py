@@ -20,10 +20,15 @@ from shared.central_leads import (
 )
 
 
-def test_category_for_preset_is_one_word() -> None:
+def test_category_for_preset_matches_hercule_names() -> None:
     assert category_for_preset("plombier") == "PLOMBIER"
     assert category_for_preset("avocats") == "AVOCAT"
     assert category_for_preset("cabinets_expertise_comptable") == "COMPTABLE"
+    assert category_for_preset("installateurs_pac_rge") == "CLIM"
+    assert category_for_preset("cabinets_conseiller_financier") == "CIF"
+    assert category_for_preset("architectes_dplg") == "ARCHITECTURE"
+    assert category_for_preset("conseillers_gestion_patrimoine") == "CIF"
+    assert category_for_preset("kinesitherapeutes") == "PARAMEDICAL"
 
 
 def test_scraped_row_is_uncleaned() -> None:
@@ -36,16 +41,28 @@ def test_scraped_row_is_uncleaned() -> None:
             "PlaceId": "place-1",
             "FirstName": "Jean",
             "LastName": "Dupont",
+            "City": "Lyon",
+            "Siret": "12345678901234",
+            "Naf": "43.22A",
         },
         preset="plombier",
     )
     assert lead["email"] == "jean@dupont.fr"
+    assert "email_normalized" not in lead
     assert lead["category"] == "PLOMBIER"
+    assert lead["niche_slug"] == "plombier"
     assert lead["status"] == STATUS_UNCLEANED
+    assert lead["status_source"] == "list_payload"
     assert lead["phone"] == "+33184801234"
-    assert lead["source"] == "outscraper"
+    assert lead["source"] == "scrape"
+    assert lead["source_name"] == "outscraper"
     assert lead["source_id"] == "place-1"
     assert lead["list_id"] is None
+    assert lead["payload"] == {
+        "city": "Lyon",
+        "siret": "12345678901234",
+        "naf": "43.22A",
+    }
 
 
 def test_upsert_does_not_downgrade_status_or_enriched_phone() -> None:
@@ -179,16 +196,45 @@ class _RpcClient:
         return _RpcResult(self._data)
 
 
-def test_upsert_sql_keeps_status_and_fills_empty_fields() -> None:
-    sql_path = Path(__file__).resolve().parents[2] / "migrations" / "proposed" / "20261006_leads_upsert_uncleaned.sql"
+def test_payload_merge_keeps_existing_keys() -> None:
+    patch = merge_uncleaned(
+        {
+            "status": STATUS_CLEANED,
+            "category": "PLOMBIER",
+            "company": "Dupont",
+            "payload": {"city": "Lyon", "siret": "111"},
+        },
+        {
+            "category": "AVOCAT",
+            "company": "Other",
+            "payload": {"city": "Paris", "naf": "43.22A", "siret": ""},
+        },
+    )
+    assert "category" not in patch
+    assert "company" not in patch
+    assert "status" not in patch
+    assert patch["payload"]["city"] == "Lyon"
+    assert patch["payload"]["siret"] == "111"
+    assert patch["payload"]["naf"] == "43.22A"
+
+
+def test_upsert_sql_matches_email_normalized_contract() -> None:
+    sql_path = (
+        Path(__file__).resolve().parents[2]
+        / "migrations"
+        / "proposed"
+        / "027b_leads_upsert_uncleaned.sql"
+    )
     sql = sql_path.read_text(encoding="utf-8")
     assert "DO NOT APPLY" in sql
-    assert "ON CONFLICT %2$s DO UPDATE SET" in sql
-    assert "EXCLUDED.status" not in sql
-    assert "WHEN %1$I.category IS NULL OR btrim(%1$I.category) = ''" in sql
+    assert "ON CONFLICT (email_normalized)" in sql
+    assert "lead_status_rank(EXCLUDED.status)" in sql
+    assert "jsonb_object_agg" in sql
+    insert_list = sql.split("INSERT INTO", 1)[1].split("SELECT", 1)[0]
+    assert "email_normalized" not in insert_list
     for column in ("first_name", "last_name", "company", "website", "phone"):
         assert f"NULLIF(btrim(%1$I.{column}), '')" in sql
-    assert LEADS_CONFLICT_TARGET == "((lower(trim(email))))"
+    assert LEADS_CONFLICT_TARGET == "email_normalized"
 
 
 def test_supabase_upsert_is_one_conflict_call() -> None:
@@ -227,6 +273,8 @@ def test_supabase_upsert_is_one_conflict_call() -> None:
     assert first["company"] == "Other"
     assert first["phone"] == "0612345678"
     assert first["last_name"] == "Martin"
+    assert first["source"] == "scrape"
+    assert "email_normalized" not in first
     assert "ilike" not in str(params)
 
 
@@ -272,8 +320,10 @@ def test_mark_cleaned_uses_exact_normalized_email() -> None:
     client.query.execute = execute  # type: ignore[method-assign]
     stats = store.mark_cleaned([" Jean@Dupont.fr ", "not-an-email", "a_b%@ex.fr"])
     assert stats == {"updated": 2}
-    assert client.query.filters[0] == ("email", ["a_b%@ex.fr", "jean@dupont.fr"])
+    assert client.query.filters[0] == ("email_normalized", ["a_b%@ex.fr", "jean@dupont.fr"])
     assert ("status", STATUS_UNCLEANED) in client.query.filters
+    assert client.query.patch["status_source"] == "manual"
+    assert client.query.patch["status"] == STATUS_CLEANED
 
 
 def test_instantly_custom_variables_drop_registry_fields() -> None:

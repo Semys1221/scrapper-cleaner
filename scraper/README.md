@@ -64,7 +64,7 @@ ExecStart=/usr/bin/python3 main.py heal --preset avocats --stale-minutes 3
 
 ## Central leads and phone enrichment
 
-Scraped rows are upserted to Supabase `public.leads` (table owned by hercule.dev) with `status=uncleaned` and a one-word `category` such as `PLOMBIER`. The unique key is the normalized email (`lower(trim(email))`). A repeat scrape keeps the existing status and category and only fills empty phone, website, name, and company fields. Uncleaned leads are not pushed to Instantly unless `HERCULE_ALLOW_UNCLEANED_INSTANTLY_PUSH=1`.
+Scraped rows are upserted to Supabase `public.leads` (table owned by hercule.dev, `026_leads.sql`) with `status=uncleaned`, `source=scrape`, and a one-word `category` such as `PLOMBIER`. The unique key is the generated column `email_normalized`. A repeat scrape does not downgrade status, keeps an existing category, fills only empty phone, website, name, and company fields, and merges new `payload` keys (city, siret, naf, and the other registry fields) without replacing keys already set. Niche presets target 3,000 leads. Uncleaned leads are not pushed to Instantly unless `HERCULE_ALLOW_UNCLEANED_INSTANTLY_PUSH=1`.
 
 After the cleaner marks rows `cleaned`, retrieve verified phones (no production run unless you pass `--execute`):
 
