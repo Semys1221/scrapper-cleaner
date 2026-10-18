@@ -85,6 +85,7 @@ PRESET_CATEGORY: dict[str, str] = {
     # COURTIER is mortgage brokers. Insurance intermediaries are IAS.
     "courtiers_credit_immobilier": "COURTIER",
     "courtiers_prevoyance_b2b": "IAS",
+    "couvreurs": "COUVREUR",
     "daf_partage": "DAF",
     "dentistes_cabinet_groupe": "DENTISTE",
     "hotels_independants": "HOTEL",
@@ -100,6 +101,7 @@ PRESET_CATEGORY: dict[str, str] = {
     "paysagistes": "PAYSAGISTE",
     "plombier": "PLOMBIER",
     "plombiers": "PLOMBIER",
+    "renovation": "RENOVATION",
     "restaurants_independants": "RESTAURANT",
     # TEST is not a hercule niche. The runbook preset must not land in COMPTABLE.
     "runbook_test": "TEST",

@@ -33,6 +33,10 @@ def test_category_for_preset_matches_hercule_names() -> None:
     assert category_for_preset("courtiers_prevoyance_b2b") == "IAS"
     assert category_for_preset("runbook_test") == "TEST"
     assert category_for_preset("biggy_agency") == "ADHOC"
+    assert category_for_preset("couvreurs") == "COUVREUR"
+    assert category_for_preset("plombiers") == "PLOMBIER"
+    assert category_for_preset("renovation") == "RENOVATION"
+    assert category_for_preset("paysagistes") == "PAYSAGISTE"
 
 
 def test_unknown_preset_does_not_guess_a_category() -> None:
