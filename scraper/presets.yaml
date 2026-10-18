@@ -17695,6 +17695,929 @@ presets:
         valeur_client: Prise de RDV avec des cabinets de courtage ORIAS indépendants (prévoyance, santé collective, protection
           sociale)
         effectif_cible: qualif à la réponse
+  couvreurs:
+    label: Couvreurs — toiture et zinguerie (France)
+    niche_group: couvreurs
+    niche_group_label: Couvreurs — toiture et zinguerie (France)
+    subniche_label: Couvreurs — toiture et zinguerie (France)
+    config:
+      OUTSCRAPER_API_KEY: ''
+      INSTANTLY_API_KEY: ''
+      INSTANTLY_NAME: Couvreur
+      SCRAPE_QUEUE_RANK: 17
+      INSTANTLY_LIST_ID: ''
+      INSTANTLY_CAMPAIGN_ID: ''
+      INSTANTLY_SUBSEQUENCE_ID: ''
+      INSTANTLY_DEDUP_LIST_IDS: []
+      INSTANTLY_DEDUP_CAMPAIGN_IDS: []
+      INSTANTLY_SKIP_IF_IN_CAMPAIGN: true
+      INSTANTLY_SKIP_IF_IN_LIST: true
+      INSTANTLY_PUSH_EVERY: 25
+      INSTANTLY_BACKLOG_PUSH_MIN: 25
+      INSTANTLY_PROVISION_LINKS: false
+      INSTANTLY_ATTACH_TO_CAMPAIGN: false
+      LINK_PROVISION_CATEGORY: jum
+      LINK_PROVISION_SEGMENT: couvreurs
+      LINK_PROVISION_RESERVATION_PAGE: couvreurs
+      ENRICH_ENABLED: false
+      WEBSITE_REQUIRED: false
+      OUTSCRAPER_FILTERS:
+      - operational_only
+      TAXONOMY_GATE_ENABLED: true
+      TAXONOMY_MATCH_MODE: taxonomy_only
+      TAXONOMY_INCLUDED_KEYWORDS:
+      - couvreur
+      - roofer
+      - roofing contractor
+      - couverture
+      - toiture
+      - zinguerie
+      - charpente-couverture
+      - couvreur zingueur
+      - charpentier couvreur
+      - entreprise de couverture
+      TAXONOMY_EXCLUDED_KEYWORDS:
+      - magasin de matériaux
+      - building materials store
+      - quincaillerie
+      - hardware store
+      - leroy merlin
+      - brico dépôt
+      - point p
+      - assurance
+      - insurance agency
+      - mutuelle
+      - mairie
+      - city hall
+      - architecte
+      - architect
+      ENRICH_INCLUDED_KEYWORDS: []
+      ENRICH_HARD_EXCLUDED_KEYWORDS: []
+      ENRICH_SOFT_EXCLUDED_KEYWORDS: []
+      OUTSCRAPER_BATCH_SIZE: 25
+      OUTSCRAPER_CONCURRENCY: 2
+      OUTSCRAPER_LIMIT_PER_QUERY: 50
+      OUTSCRAPER_POLL_INITIAL_S: 20
+      OUTSCRAPER_POLL_INTERVAL_S: 3
+      OUTSCRAPER_POLL_SLOW_S: 10
+      OUTSCRAPER_POLL_TIMEOUT_S: 480
+      OUTSCRAPER_TOTAL_LIMIT_BUFFER: 8
+      OUTSCRAPER_ENRICHMENT:
+      - leads_n_contacts
+      OUTSCRAPER_EMAIL_RECOVERY_ENABLED: true
+      TARGET_LEADS: 5000
+      TARGET_MODE: instantly_pushed
+      SCRAPE_START_QUERY_PASS: 0
+      SCRAPE_SKIP_PHASE_ENABLED: false
+      SCRAPE_SKIP_SATURATION_TO_DEPARTMENT: true
+      DUPLICATE_GEO_ADVANCE_RATE: 0.5
+      SCRAPE_RELOAD_ENABLED: true
+      SCRAPE_RELOAD_MAX_ROUNDS: 8
+      SCRAPE_RELOAD_START_GEO_PHASE: pass
+      SCRAPE_RELOAD_START_QUERY_PASS: 0
+      SCRAPE_CONTINUOUS_MODE: true
+      SCRAPE_CONTINUOUS_MAX_ZERO_CYCLES: 3
+      CONTINUOUS_KEYWORD_ROTATIONS:
+      - - couvreur
+        - couverture
+        - toiture
+        - zinguerie
+      - - charpente-couverture
+        - entreprise de couverture
+        - couvreur zingueur
+        - réparation toiture
+      - - charpentier couvreur
+        - zingueur
+        - réfection de toiture
+        - entreprise de toiture
+      SERVICE_DEFAULT: Couverture / zinguerie
+      SERVICE_RULES: []
+      KEYWORDS:
+      - couvreur
+      - couverture
+      - toiture
+      - zinguerie
+      - charpente-couverture
+      EXPANSION_KEYWORDS:
+      - entreprise de couverture
+      - couvreur zingueur
+      - réparation toiture
+      - charpentier couvreur
+      LOCATIONS:
+      - Paris
+      - Marseille
+      - Lyon
+      - Toulouse
+      - Nice
+      - Nantes
+      - Montpellier
+      - Strasbourg
+      - Bordeaux
+      - Lille
+      - Rennes
+      - Reims
+      - Toulon
+      - Saint-Etienne
+      - Le Havre
+      - Grenoble
+      - Dijon
+      - Angers
+      - Villeurbanne
+      - Saint-Denis
+      - Nimes
+      - Clermont-Ferrand
+      - Aix-en-Provence
+      - Le Mans
+      - Brest
+      - Tours
+      - Amiens
+      - Limoges
+      - Annecy
+      - Boulogne-Billancourt
+      - Perpignan
+      - Metz
+      - Besancon
+      - Orleans
+      - Rouen
+      - Montreuil
+      - Argenteuil
+      - Mulhouse
+      - Caen
+      - Nancy
+      - Roubaix
+      - Tourcoing
+      - Nanterre
+      - Vitry-sur-Seine
+      - Creteil
+      - Avignon
+      - Poitiers
+      - Aubervilliers
+      - Dunkerque
+      - Aulnay-sous-Bois
+      - Colombes
+      - Asnieres-sur-Seine
+      - Versailles
+      - Courbevoie
+      - Cherbourg-en-Cotentin
+      - Rueil-Malmaison
+      - Beziers
+      - Champigny-sur-Marne
+      - Pau
+      - La Rochelle
+      - Saint-Maur-des-Fosses
+      - Cannes
+      - Calais
+      - Antibes
+      - Drancy
+      - Ajaccio
+      - Merignac
+      - Saint-Nazaire
+      - Colmar
+      - Issy-les-Moulineaux
+      - Noisy-le-Grand
+      - Venissieux
+      - Evry-Courcouronnes
+      - Levallois-Perret
+      - Cergy
+      - Neuilly-sur-Seine
+      - Pessac
+      - Chambery
+      - Ivry-sur-Seine
+      - Enfants
+      - Quimper
+      - La Seyne-sur-Mer
+      - Antony
+      - Villeneuve-d'Ascq
+      - Lorient
+      - Saint-Quentin
+      - Epinay-sur-Seine
+      - Pantin
+      - Beauvais
+      - Tournefeuille
+      - Hyeres
+      - Cholet
+      - Garges-les-Gonesse
+      - Meaux
+      - Fontenay-sous-Bois
+      - Vincennes
+      - Arles
+      - Grasse
+      - Vannes
+      - Montlucon
+      - Belfort
+      - Charleville-Mezieres
+      - Saint-Brieuc
+      - Albi
+      - Martigues
+      - Cagnes-sur-Mer
+      - Tarbes
+      - Massy
+      - Laval
+      - Bourg-en-Bresse
+      - Aubagne
+      - Valenciennes
+      - Chateauroux
+      - Saint-Priest
+      - Saint-Malo
+      - Blois
+      - Salon-de-Provence
+      - Carcassonne
+      - Chalon-sur-Saone
+      - Thionville
+      - Brive-la-Gaillarde
+      - Meudon
+      - Castres
+      - Puteaux
+      - Suresnes
+      - Saint-Herblain
+      - Mantes-la-Jolie
+      - Gennevilliers
+      - Sète
+      - Istres
+      - Valence
+      - Caluire-et-Cuire
+      - Saint-Germain-en-Laye
+      - Talence
+      - Bastia
+      - Roanne
+      - Le Cannet
+      - Alfortville
+      - Corbeil-Essonnes
+      - Boulogne-sur-Mer
+      - Bagneux
+      - Macon
+      - Douai
+      - Auxerre
+      - Nevers
+      - Gap
+      - Reze
+      - Lens
+      - Montelimar
+      - Melun
+      - Draguignan
+      - Alencon
+      - Angouleme
+      - Agen
+      - Biarritz
+      - Chatellerault
+      - Vienne
+      - Schiltigheim
+      - Plaine
+      - Dieppe
+      - Moulins
+      - Mont-de-Marsan
+      - Haguenau
+      - Aurillac
+      - Dax
+      - Perigueux
+      - Vichy
+      - Cambrai
+      - Sens
+      - Rochefort
+      - Epinal
+      - Franconville
+      - Tremblay-en-France
+      - Chaville
+      - Goussainville
+      - Clichy
+      - Bezons
+      - Houilles
+      - Cormeilles-en-Parisis
+      - Ermont
+      - Sannois
+      - Saint-Leu-la-Foret
+      - Saint-Ouen
+      - Montigny-le-Bretonneux
+      - Conflans-Sainte-Honorine
+      - Pontoise
+      - Les Mureaux
+      - Plaisir
+      - Trappes
+      - Chatou
+      - Le Chesnay-Rocquencourt
+      - Guyancourt
+      - Elancourt
+      - Rambouillet
+      - Maisons-Laffitte
+      - Marly-le-Roi
+      - Velizy-Villacoublay
+      - Maurepas
+      - Montesson
+      - Saint-Cyr-l'Ecole
+      - Bois-d'Arcy
+      - Fontenay-le-Fleury
+      - Acheres
+      - Taverny
+      - Herblay
+      - Montmorency
+      - Saint-Gratien
+      - Deuil-la-Barre
+      - Soisy-sous-Montmorency
+      - Montmagny
+      - Saint-Brice-sous-Foret
+      - Arnouville
+      - Gonesse
+      - Villiers-le-Bel
+      - Sarcelles
+      - Fosses
+      - Louvres
+      - Survilliers
+      - Marly-la-Ville
+      - Persan
+      - Beaumont-sur-Oise
+      - Chambly
+      - Meru
+      - Creil
+      - Nogent-sur-Oise
+      - Montataire
+      - Senlis
+      - Chantilly
+      - Compiegne
+      - Margny-les-Compiegne
+      - Noyon
+      - Thourotte
+      - Ribecourt-Dreslincourt
+      - Saint-Just-en-Chaussée
+      - Clermont
+      - Breteuil
+      - Saint-Omer
+      - Longuenesse
+      - Arques
+      - Aire-sur-la-Lys
+      - Hazebrouck
+      - Bailleul
+      - Merville
+      - Nieppe
+      - Armentieres
+      - Houplines
+      - Comines
+      - Wervicq-Sud
+      - Bousbecque
+      - Roncq
+      - Halluin
+      - Neuville-en-Ferrain
+      - Linselles
+      - Bondues
+      - Mouvaux
+      - Wasquehal
+      - Croix
+      - Hem
+      - Lys-lez-Lannoy
+      - Leers
+      - Toufflers
+      - Sailly-lez-Lannoy
+      - Baisieux
+      - Willems
+      - Chereng
+      - Anstaing
+      - Gruson
+      - Bouvines
+      - Cysoing
+      - Louvil
+      - Peronne
+      - Templeuve-en-Pevele
+      - Capelle-en-Pevele
+      - Genech
+      - Cappelle-en-Pevele
+      - Pont-a-Marcq
+      - Ennevelin
+      - Fretin
+      - Avelin
+      - Vendeville
+      - Templemars
+      - Wattignies
+      - Faches-Thumesnil
+      - Ronchin
+      - Lesquin
+      - Lezennes
+      - Hellemmes
+      - Mons-en-Baroeul
+      - La Madeleine
+      - Marcq-en-Baroeul
+      - Lambersart
+      - Lompret
+      - Verlinghem
+      - Wambrechies
+      - Marquette-lez-Lille
+      - Saint-Andre-lez-Lille
+      - Loos
+      - Haubourdin
+      - Sequedin
+      - Englos
+      - Ennetieres-en-Weppes
+      - Escobecques
+      - Erquinghem-le-Sec
+      - Beaucamps-Ligny
+      - Fournes-en-Weppes
+      - Wicres
+      - Marquillies
+      - Hantay
+      - Salome
+      - La Bassee
+      - Illies
+      - Herlies
+      - Aubers
+      - Fromelles
+      - Le Maisnil
+      - Radinghem-en-Weppes
+      - Bois-Grenier
+      - Fleurbaix
+      - Laventie
+      - Sailly-sur-la-Lys
+      - Estaires
+      - La Gorgue
+      - Neuf-Berquin
+      - Vieux-Berquin
+      - Strazeele
+      - Merris
+      - Meteren
+      - Berthen
+      - Boeschepe
+      - Saint-Jans-Cappel
+      - Godewaersvelde
+      - Saint-Paul
+      - Fort-de-France
+      - Cherbourg
+      - Bayonne
+      - Narbonne
+      - Rodez
+      - Auch
+      - Cahors
+      - Mende
+      - Privas
+      - Digne-les-Bains
+      - Thonon-les-Bains
+      - Evian
+      - Lons-le-Saunier
+      - Vesoul
+      - Bar-le-Duc
+      - Laon
+      - Arras
+      - Maubeuge
+      - Bethune
+      - Evreux
+      - Alençon
+      - Chartres
+      - Dreux
+      - Bourges
+      - Troyes
+      - Montereau-Fault-Yonne
+      - Chaumont
+      - Saint-Dizier
+      - Verdun
+      - Sarreguemines
+      - Forbach
+      - Hagondange
+      - Sarrebourg
+      - Saverne
+      - Sélestat
+      - Montbéliard
+      - Pontarlier
+      - Lure
+      - Luxeuil-les-Bains
+      - Chalon-sur-Saône
+      - Autun
+      - Beaune
+      - Paray-le-Monial
+      - Thiers
+      - Issoire
+      - Riom
+      - Saint-Flour
+      - Tulle
+      - Ussel
+      - Gueret
+      - La Creuse
+      - Périgueux
+      - Sarlat
+      - Bergerac
+      - Villeneuve-sur-Lot
+      - Marmande
+      - Landes
+      - Arcachon
+      - Langon
+      - Libourne
+      - Saintes
+      - Royan
+      - Cognac
+      - Niort
+      - Fontenay-le-Comte
+      - Bressuire
+      - Saumur
+      - departement 01
+      EXPANSION_LOCATIONS:
+      - Paris 1er
+      - Paris 2e
+      - Paris 3e
+      - Paris 4e
+      - Paris 5e
+      - Paris 6e
+      - Paris 7e
+      - Paris 8e
+      - Paris 9e
+      - Paris 10e
+      - Paris 11e
+      - Paris 12e
+      - Paris 13e
+      - Paris 14e
+      - Paris 15e
+      - Paris 16e
+      - Paris 17e
+      - Paris 18e
+      - Paris 19e
+      - Paris 20e
+      - Boulogne-Billancourt
+      - Montreuil
+      - Argenteuil
+      - Nanterre
+      - Courbevoie
+      - Colombes
+      - Asnières-sur-Seine
+      - Rueil-Malmaison
+      - Aubervilliers
+      - Champigny-sur-Marne
+      - Drancy
+      - Saint-Maur-des-Fossés
+      - Issy-les-Moulineaux
+      - Levallois-Perret
+      - Noisy-le-Grand
+      - Antony
+      - Neuilly-sur-Seine
+      - Clichy
+      - Pantin
+      - Bondy
+      - Villejuif
+      - Sarcelles
+      - Cergy
+      - Palaiseau
+      - Massy
+      - Suresnes
+      - Meaux
+      - Melun
+      - Corbeil-Essonnes
+      - Sèvres
+      - Montrouge
+      - Malakoff
+      - Clamart
+      - Fontenay-aux-Roses
+      - Châtenay-Malabry
+      - Sceaux
+      - Bourg-la-Reine
+      - Cachan
+      - Arcueil
+      - Gentilly
+      - Ivry-sur-Seine
+      - Vitry-sur-Seine
+      - Thiais
+      - Choisy-le-Roi
+      - Orly
+      - Saint-Ouen
+      - Gennevilliers
+      - Le Blanc-Mesnil
+      - Épinay-sur-Seine
+      - Sartrouville
+      - Poissy
+      - Trappes
+      - Les Mureaux
+      - Mantes-la-Jolie
+      - Rambouillet
+      - Étampes
+      - Dreux
+      - Chartres
+      - Versailles
+      - Saint-Germain-en-Laye
+      - Torcy
+      - Lagny-sur-Marne
+      - Chelles
+      - Bussy-Saint-Georges
+      - Roissy-en-Brie
+      - Fontainebleau
+      - Villeurbanne
+      - Vénissieux
+      - Saint-Priest
+      - Bron
+      - Vaulx-en-Velin
+      - Décines-Charpieu
+      - Meyzieu
+      - Oullins
+      - Caluire-et-Cuire
+      - Rillieux-la-Pape
+      - Givors
+      - Bourgoin-Jallieu
+      - Vienne
+      - Échirolles
+      - Saint-Martin-d'Hères
+      - Fontaine
+      - Voiron
+      - Annemasse
+      - Thonon-les-Bains
+      - Aix-les-Bains
+      - Albertville
+      - Chambéry
+      - Annecy
+      - Saint-Étienne
+      - Firminy
+      - Roanne
+      - Montbrison
+      - Clermont-Ferrand
+      - Riom
+      - Issoire
+      - Thiers
+      - Le Puy-en-Velay
+      - Aurillac
+      - Mende
+      - Alès
+      - Béziers
+      - Sète
+      - Lunel
+      - Frontignan
+      - Agde
+      - Castelnau-le-Lez
+      - Lattes
+      - Perpignan
+      - Narbonne
+      - Carcassonne
+      - Avignon
+      - Orange
+      - Carpentras
+      - Cavaillon
+      - Salon-de-Provence
+      - Istres
+      - Martigues
+      - Marignane
+      - Aubagne
+      - La Ciotat
+      - Bandol
+      - Sanary-sur-Mer
+      - La Seyne-sur-Mer
+      - Hyères
+      - Fréjus
+      - Saint-Raphaël
+      - Grasse
+      - Cannes
+      - Antibes
+      - Cagnes-sur-Mer
+      - Saint-Laurent-du-Var
+      - Menton
+      - Draguignan
+      - Brignoles
+      - Gap
+      - Manosque
+      - Digne-les-Bains
+      - Valence
+      - Romans-sur-Isère
+      - Montélimar
+      - Grenoble
+      - Bourg-en-Bresse
+      - Oyonnax
+      - Mâcon
+      - Chalon-sur-Saône
+      - Beaune
+      - Dijon
+      - Auxerre
+      - Sens
+      - Nevers
+      - Moulins
+      - Montluçon
+      - Vichy
+      - Limoges
+      - Guéret
+      - Tulle
+      - Brive-la-Gaillarde
+      - Périgueux
+      - Bergerac
+      - Agen
+      - Montauban
+      - Albi
+      - Castres
+      - Rodez
+      - Cahors
+      - Tarbes
+      - Pau
+      - Bayonne
+      - Biarritz
+      - Anglet
+      - Dax
+      - Mont-de-Marsan
+      - Libourne
+      - Arcachon
+      - La Rochelle
+      - Rochefort
+      - Saintes
+      - Niort
+      - Bressuire
+      - Saumur
+      - Angers
+      - Cholet
+      - Laval
+      - Le Mans
+      - Tours
+      - Saint-Cyr-sur-Loire
+      - Joué-lès-Tours
+      - Blois
+      - Vendôme
+      - Orléans
+      - Montargis
+      - Chartres
+      - Caen
+      - Cherbourg-en-Cotentin
+      - Saint-Lô
+      - Granville
+      - Le Havre
+      - Dieppe
+      - Rouen
+      - Évreux
+      - Alençon
+      - Lisieux
+      - Deauville
+      - Lille
+      - Roubaix
+      - Tourcoing
+      - Dunkerque
+      - Calais
+      - Boulogne-sur-Mer
+      - Arras
+      - Lens
+      - Béthune
+      - Valenciennes
+      - Douai
+      - Cambrai
+      - Maubeuge
+      - Amiens
+      - Beauvais
+      - Compiègne
+      - Creil
+      - Reims
+      - Châlons-en-Champagne
+      - Épernay
+      - Troyes
+      - Chaumont
+      - Nancy
+      - Metz
+      - Thionville
+      - Forbach
+      - Sarreguemines
+      - Strasbourg
+      - Colmar
+      - Mulhouse
+      - Haguenau
+      - Besançon
+      - Belfort
+      - Montbéliard
+      - Dole
+      - Lons-le-Saunier
+      - Pontarlier
+      - Nîmes
+      - Albi
+      - Montpellier
+      - Narbonne
+      - Perpignan
+      - Toulouse
+      - Blagnac
+      - Colomiers
+      - Tournefeuille
+      - Muret
+      - Tarbes
+      - Pau
+      - Bayonne
+      - Biarritz
+      - Bordeaux
+      - Mérignac
+      - Pessac
+      - Talence
+      - Bègles
+      - Arcachon
+      - Libourne
+      - La Rochelle
+      - Nantes
+      - Saint-Nazaire
+      - Rezé
+      - Orvault
+      - Saint-Herblain
+      - Vertou
+      - Carquefou
+      - Rennes
+      - Saint-Malo
+      - Vitré
+      - Fougères
+      - Redon
+      - Lorient
+      - Vannes
+      - Quimper
+      - Brest
+      - Morlaix
+      - Lannion
+      - Saint-Brieuc
+      - Dinan
+      - departement 75
+      - departement 92
+      - departement 93
+      - departement 94
+      - departement 78
+      - departement 91
+      - departement 77
+      - departement 95
+      - departement 69
+      - departement 13
+      - departement 06
+      - departement 33
+      - departement 31
+      - departement 59
+      - departement 44
+      - departement 67
+      - departement 34
+      - departement 38
+      - departement 35
+      - departement 76
+      - departement 51
+      - departement 54
+      - departement 57
+      - departement 68
+      - departement 74
+      - departement 73
+      - departement 62
+      - departement 80
+      - departement 14
+      - departement 27
+      - departement 29
+      - departement 56
+      - departement 22
+      - departement 49
+      - departement 72
+      - departement 37
+      - departement 86
+      - departement 87
+      - departement 24
+      - departement 47
+      - departement 64
+      - departement 40
+      - departement 17
+      - departement 79
+      - departement 85
+      - departement 53
+      - departement 50
+      - departement 61
+      - departement 60
+      - departement 02
+      - departement 08
+      - departement 10
+      - departement 52
+      - departement 88
+      - departement 90
+      - departement 25
+      - departement 39
+      - departement 70
+      - departement 71
+      - departement 21
+      - departement 58
+      - departement 03
+      - departement 63
+      - departement 42
+      - departement 43
+      - departement 07
+      - departement 26
+      - departement 84
+      - departement 30
+      - departement 48
+      - departement 12
+      - departement 81
+      - departement 82
+      - departement 46
+      - departement 15
+      - departement 19
+      - departement 23
+      - departement 16
+      - departement 18
+      - departement 36
+      - departement 41
+      - departement 45
+      - departement 28
+      - departement 89
+      - departement 55
+      - departement 65
+      - departement 66
+      - departement 11
+      - departement 83
+      - departement 05
+      - departement 04
+      - departement 01
+      EXCLUDE_DOMAINS:
+      - duckduckgo.com
+      - google.com
+      - google.fr
+      - facebook.com
+      - instagram.com
+      - linkedin.com
+      - youtube.com
+      - pinterest.com
+      - tiktok.com
+      - societe.com
+      - pagesjaunes.fr
+      PAPPERS_ENABLED: false
+      NICHE_METADATA:
+        angle: Remplir le carnet toiture (réfection, zinguerie, charpente-couverture) avant la saison des intempéries
+        valeur_client: Réfection de toiture 8–25 k€ (jusqu'à 40 k€)
+        effectif_cible: entreprises de couverture avec salariés
+        priorite: 17
   daf_partage:
     label: DAF à temps partagé (France)
     niche_group: daf_partage
@@ -28813,6 +29736,1852 @@ presets:
         valeur_client: Création de jardin clé en main 5–15 k€ (jusqu'à 30 k€)
         effectif_cible: entreprises avec salariés (≈38 % des 33 550 entreprises Unep)
         priorite: 11
+  plombiers:
+    label: Plombiers — plomberie et sanitaire (France)
+    niche_group: plombiers
+    niche_group_label: Plombiers — plomberie et sanitaire (France)
+    subniche_label: Plombiers — plomberie et sanitaire (France)
+    config:
+      OUTSCRAPER_API_KEY: ''
+      INSTANTLY_API_KEY: ''
+      INSTANTLY_NAME: Plombier
+      SCRAPE_QUEUE_RANK: 18
+      INSTANTLY_LIST_ID: ''
+      INSTANTLY_CAMPAIGN_ID: ''
+      INSTANTLY_SUBSEQUENCE_ID: ''
+      INSTANTLY_DEDUP_LIST_IDS: []
+      INSTANTLY_DEDUP_CAMPAIGN_IDS: []
+      INSTANTLY_SKIP_IF_IN_CAMPAIGN: true
+      INSTANTLY_SKIP_IF_IN_LIST: true
+      INSTANTLY_PUSH_EVERY: 25
+      INSTANTLY_BACKLOG_PUSH_MIN: 25
+      INSTANTLY_PROVISION_LINKS: false
+      INSTANTLY_ATTACH_TO_CAMPAIGN: false
+      LINK_PROVISION_CATEGORY: jum
+      LINK_PROVISION_SEGMENT: plombiers
+      LINK_PROVISION_RESERVATION_PAGE: plombiers
+      ENRICH_ENABLED: false
+      WEBSITE_REQUIRED: false
+      OUTSCRAPER_FILTERS:
+      - operational_only
+      TAXONOMY_GATE_ENABLED: true
+      TAXONOMY_MATCH_MODE: taxonomy_only
+      TAXONOMY_INCLUDED_KEYWORDS:
+      - plombier
+      - plumber
+      - plumbing contractor
+      - plomberie
+      - chauffagiste-plombier
+      - plombier chauffagiste
+      - dépannage plomberie
+      - sanitaire
+      - installation sanitaire
+      - entreprise de plomberie
+      TAXONOMY_EXCLUDED_KEYWORDS:
+      - magasin de salles de bain
+      - bathroom supply store
+      - showroom sanitaire
+      - toilettes publiques
+      - public restroom
+      - quincaillerie
+      - hardware store
+      - leroy merlin
+      - brico dépôt
+      - point p
+      - mairie
+      - city hall
+      - pisciniste
+      - swimming pool contractor
+      ENRICH_INCLUDED_KEYWORDS: []
+      ENRICH_HARD_EXCLUDED_KEYWORDS: []
+      ENRICH_SOFT_EXCLUDED_KEYWORDS: []
+      OUTSCRAPER_BATCH_SIZE: 25
+      OUTSCRAPER_CONCURRENCY: 2
+      OUTSCRAPER_LIMIT_PER_QUERY: 50
+      OUTSCRAPER_POLL_INITIAL_S: 20
+      OUTSCRAPER_POLL_INTERVAL_S: 3
+      OUTSCRAPER_POLL_SLOW_S: 10
+      OUTSCRAPER_POLL_TIMEOUT_S: 480
+      OUTSCRAPER_TOTAL_LIMIT_BUFFER: 8
+      OUTSCRAPER_ENRICHMENT:
+      - leads_n_contacts
+      OUTSCRAPER_EMAIL_RECOVERY_ENABLED: true
+      TARGET_LEADS: 5000
+      TARGET_MODE: instantly_pushed
+      SCRAPE_START_QUERY_PASS: 0
+      SCRAPE_SKIP_PHASE_ENABLED: false
+      SCRAPE_SKIP_SATURATION_TO_DEPARTMENT: true
+      DUPLICATE_GEO_ADVANCE_RATE: 0.5
+      SCRAPE_RELOAD_ENABLED: true
+      SCRAPE_RELOAD_MAX_ROUNDS: 8
+      SCRAPE_RELOAD_START_GEO_PHASE: pass
+      SCRAPE_RELOAD_START_QUERY_PASS: 0
+      SCRAPE_CONTINUOUS_MODE: true
+      SCRAPE_CONTINUOUS_MAX_ZERO_CYCLES: 3
+      CONTINUOUS_KEYWORD_ROTATIONS:
+      - - plombier
+        - plomberie
+        - chauffagiste-plombier
+        - dépannage plomberie
+      - - sanitaire
+        - entreprise de plomberie
+        - plombier chauffagiste
+        - installation sanitaire
+      - - dépannage plombier
+        - plombier sanitaire
+        - installation plomberie
+        - entreprise sanitaire
+      SERVICE_DEFAULT: Plomberie / sanitaire
+      SERVICE_RULES: []
+      KEYWORDS:
+      - plombier
+      - plomberie
+      - chauffagiste-plombier
+      - dépannage plomberie
+      - sanitaire
+      EXPANSION_KEYWORDS:
+      - entreprise de plomberie
+      - plombier chauffagiste
+      - installation sanitaire
+      - dépannage plombier
+      LOCATIONS:
+      - Paris
+      - Marseille
+      - Lyon
+      - Toulouse
+      - Nice
+      - Nantes
+      - Montpellier
+      - Strasbourg
+      - Bordeaux
+      - Lille
+      - Rennes
+      - Reims
+      - Toulon
+      - Saint-Etienne
+      - Le Havre
+      - Grenoble
+      - Dijon
+      - Angers
+      - Villeurbanne
+      - Saint-Denis
+      - Nimes
+      - Clermont-Ferrand
+      - Aix-en-Provence
+      - Le Mans
+      - Brest
+      - Tours
+      - Amiens
+      - Limoges
+      - Annecy
+      - Boulogne-Billancourt
+      - Perpignan
+      - Metz
+      - Besancon
+      - Orleans
+      - Rouen
+      - Montreuil
+      - Argenteuil
+      - Mulhouse
+      - Caen
+      - Nancy
+      - Roubaix
+      - Tourcoing
+      - Nanterre
+      - Vitry-sur-Seine
+      - Creteil
+      - Avignon
+      - Poitiers
+      - Aubervilliers
+      - Dunkerque
+      - Aulnay-sous-Bois
+      - Colombes
+      - Asnieres-sur-Seine
+      - Versailles
+      - Courbevoie
+      - Cherbourg-en-Cotentin
+      - Rueil-Malmaison
+      - Beziers
+      - Champigny-sur-Marne
+      - Pau
+      - La Rochelle
+      - Saint-Maur-des-Fosses
+      - Cannes
+      - Calais
+      - Antibes
+      - Drancy
+      - Ajaccio
+      - Merignac
+      - Saint-Nazaire
+      - Colmar
+      - Issy-les-Moulineaux
+      - Noisy-le-Grand
+      - Venissieux
+      - Evry-Courcouronnes
+      - Levallois-Perret
+      - Cergy
+      - Neuilly-sur-Seine
+      - Pessac
+      - Chambery
+      - Ivry-sur-Seine
+      - Enfants
+      - Quimper
+      - La Seyne-sur-Mer
+      - Antony
+      - Villeneuve-d'Ascq
+      - Lorient
+      - Saint-Quentin
+      - Epinay-sur-Seine
+      - Pantin
+      - Beauvais
+      - Tournefeuille
+      - Hyeres
+      - Cholet
+      - Garges-les-Gonesse
+      - Meaux
+      - Fontenay-sous-Bois
+      - Vincennes
+      - Arles
+      - Grasse
+      - Vannes
+      - Montlucon
+      - Belfort
+      - Charleville-Mezieres
+      - Saint-Brieuc
+      - Albi
+      - Martigues
+      - Cagnes-sur-Mer
+      - Tarbes
+      - Massy
+      - Laval
+      - Bourg-en-Bresse
+      - Aubagne
+      - Valenciennes
+      - Chateauroux
+      - Saint-Priest
+      - Saint-Malo
+      - Blois
+      - Salon-de-Provence
+      - Carcassonne
+      - Chalon-sur-Saone
+      - Thionville
+      - Brive-la-Gaillarde
+      - Meudon
+      - Castres
+      - Puteaux
+      - Suresnes
+      - Saint-Herblain
+      - Mantes-la-Jolie
+      - Gennevilliers
+      - Sète
+      - Istres
+      - Valence
+      - Caluire-et-Cuire
+      - Saint-Germain-en-Laye
+      - Talence
+      - Bastia
+      - Roanne
+      - Le Cannet
+      - Alfortville
+      - Corbeil-Essonnes
+      - Boulogne-sur-Mer
+      - Bagneux
+      - Macon
+      - Douai
+      - Auxerre
+      - Nevers
+      - Gap
+      - Reze
+      - Lens
+      - Montelimar
+      - Melun
+      - Draguignan
+      - Alencon
+      - Angouleme
+      - Agen
+      - Biarritz
+      - Chatellerault
+      - Vienne
+      - Schiltigheim
+      - Plaine
+      - Dieppe
+      - Moulins
+      - Mont-de-Marsan
+      - Haguenau
+      - Aurillac
+      - Dax
+      - Perigueux
+      - Vichy
+      - Cambrai
+      - Sens
+      - Rochefort
+      - Epinal
+      - Franconville
+      - Tremblay-en-France
+      - Chaville
+      - Goussainville
+      - Clichy
+      - Bezons
+      - Houilles
+      - Cormeilles-en-Parisis
+      - Ermont
+      - Sannois
+      - Saint-Leu-la-Foret
+      - Saint-Ouen
+      - Montigny-le-Bretonneux
+      - Conflans-Sainte-Honorine
+      - Pontoise
+      - Les Mureaux
+      - Plaisir
+      - Trappes
+      - Chatou
+      - Le Chesnay-Rocquencourt
+      - Guyancourt
+      - Elancourt
+      - Rambouillet
+      - Maisons-Laffitte
+      - Marly-le-Roi
+      - Velizy-Villacoublay
+      - Maurepas
+      - Montesson
+      - Saint-Cyr-l'Ecole
+      - Bois-d'Arcy
+      - Fontenay-le-Fleury
+      - Acheres
+      - Taverny
+      - Herblay
+      - Montmorency
+      - Saint-Gratien
+      - Deuil-la-Barre
+      - Soisy-sous-Montmorency
+      - Montmagny
+      - Saint-Brice-sous-Foret
+      - Arnouville
+      - Gonesse
+      - Villiers-le-Bel
+      - Sarcelles
+      - Fosses
+      - Louvres
+      - Survilliers
+      - Marly-la-Ville
+      - Persan
+      - Beaumont-sur-Oise
+      - Chambly
+      - Meru
+      - Creil
+      - Nogent-sur-Oise
+      - Montataire
+      - Senlis
+      - Chantilly
+      - Compiegne
+      - Margny-les-Compiegne
+      - Noyon
+      - Thourotte
+      - Ribecourt-Dreslincourt
+      - Saint-Just-en-Chaussée
+      - Clermont
+      - Breteuil
+      - Saint-Omer
+      - Longuenesse
+      - Arques
+      - Aire-sur-la-Lys
+      - Hazebrouck
+      - Bailleul
+      - Merville
+      - Nieppe
+      - Armentieres
+      - Houplines
+      - Comines
+      - Wervicq-Sud
+      - Bousbecque
+      - Roncq
+      - Halluin
+      - Neuville-en-Ferrain
+      - Linselles
+      - Bondues
+      - Mouvaux
+      - Wasquehal
+      - Croix
+      - Hem
+      - Lys-lez-Lannoy
+      - Leers
+      - Toufflers
+      - Sailly-lez-Lannoy
+      - Baisieux
+      - Willems
+      - Chereng
+      - Anstaing
+      - Gruson
+      - Bouvines
+      - Cysoing
+      - Louvil
+      - Peronne
+      - Templeuve-en-Pevele
+      - Capelle-en-Pevele
+      - Genech
+      - Cappelle-en-Pevele
+      - Pont-a-Marcq
+      - Ennevelin
+      - Fretin
+      - Avelin
+      - Vendeville
+      - Templemars
+      - Wattignies
+      - Faches-Thumesnil
+      - Ronchin
+      - Lesquin
+      - Lezennes
+      - Hellemmes
+      - Mons-en-Baroeul
+      - La Madeleine
+      - Marcq-en-Baroeul
+      - Lambersart
+      - Lompret
+      - Verlinghem
+      - Wambrechies
+      - Marquette-lez-Lille
+      - Saint-Andre-lez-Lille
+      - Loos
+      - Haubourdin
+      - Sequedin
+      - Englos
+      - Ennetieres-en-Weppes
+      - Escobecques
+      - Erquinghem-le-Sec
+      - Beaucamps-Ligny
+      - Fournes-en-Weppes
+      - Wicres
+      - Marquillies
+      - Hantay
+      - Salome
+      - La Bassee
+      - Illies
+      - Herlies
+      - Aubers
+      - Fromelles
+      - Le Maisnil
+      - Radinghem-en-Weppes
+      - Bois-Grenier
+      - Fleurbaix
+      - Laventie
+      - Sailly-sur-la-Lys
+      - Estaires
+      - La Gorgue
+      - Neuf-Berquin
+      - Vieux-Berquin
+      - Strazeele
+      - Merris
+      - Meteren
+      - Berthen
+      - Boeschepe
+      - Saint-Jans-Cappel
+      - Godewaersvelde
+      - Saint-Paul
+      - Fort-de-France
+      - Cherbourg
+      - Bayonne
+      - Narbonne
+      - Rodez
+      - Auch
+      - Cahors
+      - Mende
+      - Privas
+      - Digne-les-Bains
+      - Thonon-les-Bains
+      - Evian
+      - Lons-le-Saunier
+      - Vesoul
+      - Bar-le-Duc
+      - Laon
+      - Arras
+      - Maubeuge
+      - Bethune
+      - Evreux
+      - Alençon
+      - Chartres
+      - Dreux
+      - Bourges
+      - Troyes
+      - Montereau-Fault-Yonne
+      - Chaumont
+      - Saint-Dizier
+      - Verdun
+      - Sarreguemines
+      - Forbach
+      - Hagondange
+      - Sarrebourg
+      - Saverne
+      - Sélestat
+      - Montbéliard
+      - Pontarlier
+      - Lure
+      - Luxeuil-les-Bains
+      - Chalon-sur-Saône
+      - Autun
+      - Beaune
+      - Paray-le-Monial
+      - Thiers
+      - Issoire
+      - Riom
+      - Saint-Flour
+      - Tulle
+      - Ussel
+      - Gueret
+      - La Creuse
+      - Périgueux
+      - Sarlat
+      - Bergerac
+      - Villeneuve-sur-Lot
+      - Marmande
+      - Landes
+      - Arcachon
+      - Langon
+      - Libourne
+      - Saintes
+      - Royan
+      - Cognac
+      - Niort
+      - Fontenay-le-Comte
+      - Bressuire
+      - Saumur
+      - departement 01
+      EXPANSION_LOCATIONS:
+      - Paris 1er
+      - Paris 2e
+      - Paris 3e
+      - Paris 4e
+      - Paris 5e
+      - Paris 6e
+      - Paris 7e
+      - Paris 8e
+      - Paris 9e
+      - Paris 10e
+      - Paris 11e
+      - Paris 12e
+      - Paris 13e
+      - Paris 14e
+      - Paris 15e
+      - Paris 16e
+      - Paris 17e
+      - Paris 18e
+      - Paris 19e
+      - Paris 20e
+      - Boulogne-Billancourt
+      - Montreuil
+      - Argenteuil
+      - Nanterre
+      - Courbevoie
+      - Colombes
+      - Asnières-sur-Seine
+      - Rueil-Malmaison
+      - Aubervilliers
+      - Champigny-sur-Marne
+      - Drancy
+      - Saint-Maur-des-Fossés
+      - Issy-les-Moulineaux
+      - Levallois-Perret
+      - Noisy-le-Grand
+      - Antony
+      - Neuilly-sur-Seine
+      - Clichy
+      - Pantin
+      - Bondy
+      - Villejuif
+      - Sarcelles
+      - Cergy
+      - Palaiseau
+      - Massy
+      - Suresnes
+      - Meaux
+      - Melun
+      - Corbeil-Essonnes
+      - Sèvres
+      - Montrouge
+      - Malakoff
+      - Clamart
+      - Fontenay-aux-Roses
+      - Châtenay-Malabry
+      - Sceaux
+      - Bourg-la-Reine
+      - Cachan
+      - Arcueil
+      - Gentilly
+      - Ivry-sur-Seine
+      - Vitry-sur-Seine
+      - Thiais
+      - Choisy-le-Roi
+      - Orly
+      - Saint-Ouen
+      - Gennevilliers
+      - Le Blanc-Mesnil
+      - Épinay-sur-Seine
+      - Sartrouville
+      - Poissy
+      - Trappes
+      - Les Mureaux
+      - Mantes-la-Jolie
+      - Rambouillet
+      - Étampes
+      - Dreux
+      - Chartres
+      - Versailles
+      - Saint-Germain-en-Laye
+      - Torcy
+      - Lagny-sur-Marne
+      - Chelles
+      - Bussy-Saint-Georges
+      - Roissy-en-Brie
+      - Fontainebleau
+      - Villeurbanne
+      - Vénissieux
+      - Saint-Priest
+      - Bron
+      - Vaulx-en-Velin
+      - Décines-Charpieu
+      - Meyzieu
+      - Oullins
+      - Caluire-et-Cuire
+      - Rillieux-la-Pape
+      - Givors
+      - Bourgoin-Jallieu
+      - Vienne
+      - Échirolles
+      - Saint-Martin-d'Hères
+      - Fontaine
+      - Voiron
+      - Annemasse
+      - Thonon-les-Bains
+      - Aix-les-Bains
+      - Albertville
+      - Chambéry
+      - Annecy
+      - Saint-Étienne
+      - Firminy
+      - Roanne
+      - Montbrison
+      - Clermont-Ferrand
+      - Riom
+      - Issoire
+      - Thiers
+      - Le Puy-en-Velay
+      - Aurillac
+      - Mende
+      - Alès
+      - Béziers
+      - Sète
+      - Lunel
+      - Frontignan
+      - Agde
+      - Castelnau-le-Lez
+      - Lattes
+      - Perpignan
+      - Narbonne
+      - Carcassonne
+      - Avignon
+      - Orange
+      - Carpentras
+      - Cavaillon
+      - Salon-de-Provence
+      - Istres
+      - Martigues
+      - Marignane
+      - Aubagne
+      - La Ciotat
+      - Bandol
+      - Sanary-sur-Mer
+      - La Seyne-sur-Mer
+      - Hyères
+      - Fréjus
+      - Saint-Raphaël
+      - Grasse
+      - Cannes
+      - Antibes
+      - Cagnes-sur-Mer
+      - Saint-Laurent-du-Var
+      - Menton
+      - Draguignan
+      - Brignoles
+      - Gap
+      - Manosque
+      - Digne-les-Bains
+      - Valence
+      - Romans-sur-Isère
+      - Montélimar
+      - Grenoble
+      - Bourg-en-Bresse
+      - Oyonnax
+      - Mâcon
+      - Chalon-sur-Saône
+      - Beaune
+      - Dijon
+      - Auxerre
+      - Sens
+      - Nevers
+      - Moulins
+      - Montluçon
+      - Vichy
+      - Limoges
+      - Guéret
+      - Tulle
+      - Brive-la-Gaillarde
+      - Périgueux
+      - Bergerac
+      - Agen
+      - Montauban
+      - Albi
+      - Castres
+      - Rodez
+      - Cahors
+      - Tarbes
+      - Pau
+      - Bayonne
+      - Biarritz
+      - Anglet
+      - Dax
+      - Mont-de-Marsan
+      - Libourne
+      - Arcachon
+      - La Rochelle
+      - Rochefort
+      - Saintes
+      - Niort
+      - Bressuire
+      - Saumur
+      - Angers
+      - Cholet
+      - Laval
+      - Le Mans
+      - Tours
+      - Saint-Cyr-sur-Loire
+      - Joué-lès-Tours
+      - Blois
+      - Vendôme
+      - Orléans
+      - Montargis
+      - Chartres
+      - Caen
+      - Cherbourg-en-Cotentin
+      - Saint-Lô
+      - Granville
+      - Le Havre
+      - Dieppe
+      - Rouen
+      - Évreux
+      - Alençon
+      - Lisieux
+      - Deauville
+      - Lille
+      - Roubaix
+      - Tourcoing
+      - Dunkerque
+      - Calais
+      - Boulogne-sur-Mer
+      - Arras
+      - Lens
+      - Béthune
+      - Valenciennes
+      - Douai
+      - Cambrai
+      - Maubeuge
+      - Amiens
+      - Beauvais
+      - Compiègne
+      - Creil
+      - Reims
+      - Châlons-en-Champagne
+      - Épernay
+      - Troyes
+      - Chaumont
+      - Nancy
+      - Metz
+      - Thionville
+      - Forbach
+      - Sarreguemines
+      - Strasbourg
+      - Colmar
+      - Mulhouse
+      - Haguenau
+      - Besançon
+      - Belfort
+      - Montbéliard
+      - Dole
+      - Lons-le-Saunier
+      - Pontarlier
+      - Nîmes
+      - Albi
+      - Montpellier
+      - Narbonne
+      - Perpignan
+      - Toulouse
+      - Blagnac
+      - Colomiers
+      - Tournefeuille
+      - Muret
+      - Tarbes
+      - Pau
+      - Bayonne
+      - Biarritz
+      - Bordeaux
+      - Mérignac
+      - Pessac
+      - Talence
+      - Bègles
+      - Arcachon
+      - Libourne
+      - La Rochelle
+      - Nantes
+      - Saint-Nazaire
+      - Rezé
+      - Orvault
+      - Saint-Herblain
+      - Vertou
+      - Carquefou
+      - Rennes
+      - Saint-Malo
+      - Vitré
+      - Fougères
+      - Redon
+      - Lorient
+      - Vannes
+      - Quimper
+      - Brest
+      - Morlaix
+      - Lannion
+      - Saint-Brieuc
+      - Dinan
+      - departement 75
+      - departement 92
+      - departement 93
+      - departement 94
+      - departement 78
+      - departement 91
+      - departement 77
+      - departement 95
+      - departement 69
+      - departement 13
+      - departement 06
+      - departement 33
+      - departement 31
+      - departement 59
+      - departement 44
+      - departement 67
+      - departement 34
+      - departement 38
+      - departement 35
+      - departement 76
+      - departement 51
+      - departement 54
+      - departement 57
+      - departement 68
+      - departement 74
+      - departement 73
+      - departement 62
+      - departement 80
+      - departement 14
+      - departement 27
+      - departement 29
+      - departement 56
+      - departement 22
+      - departement 49
+      - departement 72
+      - departement 37
+      - departement 86
+      - departement 87
+      - departement 24
+      - departement 47
+      - departement 64
+      - departement 40
+      - departement 17
+      - departement 79
+      - departement 85
+      - departement 53
+      - departement 50
+      - departement 61
+      - departement 60
+      - departement 02
+      - departement 08
+      - departement 10
+      - departement 52
+      - departement 88
+      - departement 90
+      - departement 25
+      - departement 39
+      - departement 70
+      - departement 71
+      - departement 21
+      - departement 58
+      - departement 03
+      - departement 63
+      - departement 42
+      - departement 43
+      - departement 07
+      - departement 26
+      - departement 84
+      - departement 30
+      - departement 48
+      - departement 12
+      - departement 81
+      - departement 82
+      - departement 46
+      - departement 15
+      - departement 19
+      - departement 23
+      - departement 16
+      - departement 18
+      - departement 36
+      - departement 41
+      - departement 45
+      - departement 28
+      - departement 89
+      - departement 55
+      - departement 65
+      - departement 66
+      - departement 11
+      - departement 83
+      - departement 05
+      - departement 04
+      - departement 01
+      EXCLUDE_DOMAINS:
+      - duckduckgo.com
+      - google.com
+      - google.fr
+      - facebook.com
+      - instagram.com
+      - linkedin.com
+      - youtube.com
+      - pinterest.com
+      - tiktok.com
+      - societe.com
+      - pagesjaunes.fr
+      PAPPERS_ENABLED: false
+      NICHE_METADATA:
+        angle: Remplir le carnet dépannage plomberie et installation sanitaire / chauffage
+        valeur_client: Rénovation salle de bain ou installation chauffage 3–12 k€
+        effectif_cible: entreprises de plomberie avec salariés
+        priorite: 18
+  renovation:
+    label: Rénovation — tous corps d'état (France)
+    niche_group: renovation
+    niche_group_label: Rénovation — tous corps d'état (France)
+    subniche_label: Rénovation — tous corps d'état (France)
+    config:
+      OUTSCRAPER_API_KEY: ''
+      INSTANTLY_API_KEY: ''
+      INSTANTLY_NAME: Rénovation
+      SCRAPE_QUEUE_RANK: 19
+      INSTANTLY_LIST_ID: ''
+      INSTANTLY_CAMPAIGN_ID: ''
+      INSTANTLY_SUBSEQUENCE_ID: ''
+      INSTANTLY_DEDUP_LIST_IDS: []
+      INSTANTLY_DEDUP_CAMPAIGN_IDS: []
+      INSTANTLY_SKIP_IF_IN_CAMPAIGN: true
+      INSTANTLY_SKIP_IF_IN_LIST: true
+      INSTANTLY_PUSH_EVERY: 25
+      INSTANTLY_BACKLOG_PUSH_MIN: 25
+      INSTANTLY_PROVISION_LINKS: false
+      INSTANTLY_ATTACH_TO_CAMPAIGN: false
+      LINK_PROVISION_CATEGORY: jum
+      LINK_PROVISION_SEGMENT: renovation
+      LINK_PROVISION_RESERVATION_PAGE: renovation
+      ENRICH_ENABLED: false
+      WEBSITE_REQUIRED: false
+      OUTSCRAPER_FILTERS:
+      - operational_only
+      TAXONOMY_GATE_ENABLED: true
+      TAXONOMY_MATCH_MODE: taxonomy_only
+      TAXONOMY_INCLUDED_KEYWORDS:
+      - rénovation
+      - renovation contractor
+      - entreprise de rénovation
+      - rénovation intérieure
+      - rénovation maison
+      - tous corps d'état
+      - entreprise générale du bâtiment
+      - general contractor
+      - home builder
+      - entrepreneur en bâtiment
+      TAXONOMY_EXCLUDED_KEYWORDS:
+      - agence immobilière
+      - real estate agency
+      - promoteur immobilier
+      - property developer
+      - architecte
+      - architect
+      - décorateur
+      - interior designer
+      - magasin de matériaux
+      - building materials store
+      - quincaillerie
+      - mairie
+      - city hall
+      - diagnostic immobilier
+      ENRICH_INCLUDED_KEYWORDS: []
+      ENRICH_HARD_EXCLUDED_KEYWORDS: []
+      ENRICH_SOFT_EXCLUDED_KEYWORDS: []
+      OUTSCRAPER_BATCH_SIZE: 25
+      OUTSCRAPER_CONCURRENCY: 2
+      OUTSCRAPER_LIMIT_PER_QUERY: 50
+      OUTSCRAPER_POLL_INITIAL_S: 20
+      OUTSCRAPER_POLL_INTERVAL_S: 3
+      OUTSCRAPER_POLL_SLOW_S: 10
+      OUTSCRAPER_POLL_TIMEOUT_S: 480
+      OUTSCRAPER_TOTAL_LIMIT_BUFFER: 8
+      OUTSCRAPER_ENRICHMENT:
+      - leads_n_contacts
+      OUTSCRAPER_EMAIL_RECOVERY_ENABLED: true
+      TARGET_LEADS: 5000
+      TARGET_MODE: instantly_pushed
+      SCRAPE_START_QUERY_PASS: 0
+      SCRAPE_SKIP_PHASE_ENABLED: false
+      SCRAPE_SKIP_SATURATION_TO_DEPARTMENT: true
+      DUPLICATE_GEO_ADVANCE_RATE: 0.5
+      SCRAPE_RELOAD_ENABLED: true
+      SCRAPE_RELOAD_MAX_ROUNDS: 8
+      SCRAPE_RELOAD_START_GEO_PHASE: pass
+      SCRAPE_RELOAD_START_QUERY_PASS: 0
+      SCRAPE_CONTINUOUS_MODE: true
+      SCRAPE_CONTINUOUS_MAX_ZERO_CYCLES: 3
+      CONTINUOUS_KEYWORD_ROTATIONS:
+      - - entreprise de rénovation
+        - rénovation intérieure
+        - rénovation maison
+        - tous corps d'état
+      - - entreprise générale du bâtiment
+        - rénovation tous corps d'état
+        - entreprise générale
+        - rénovation de maison
+      - - contractant général
+        - entreprise de bâtiment
+        - rénovation complète
+        - rénovation habitat
+      SERVICE_DEFAULT: Rénovation tous corps d'état
+      SERVICE_RULES: []
+      KEYWORDS:
+      - entreprise de rénovation
+      - rénovation intérieure
+      - rénovation maison
+      - tous corps d'état
+      - entreprise générale du bâtiment
+      EXPANSION_KEYWORDS:
+      - rénovation tous corps d'état
+      - entreprise générale
+      - rénovation de maison
+      - contractant général
+      LOCATIONS:
+      - Paris
+      - Marseille
+      - Lyon
+      - Toulouse
+      - Nice
+      - Nantes
+      - Montpellier
+      - Strasbourg
+      - Bordeaux
+      - Lille
+      - Rennes
+      - Reims
+      - Toulon
+      - Saint-Etienne
+      - Le Havre
+      - Grenoble
+      - Dijon
+      - Angers
+      - Villeurbanne
+      - Saint-Denis
+      - Nimes
+      - Clermont-Ferrand
+      - Aix-en-Provence
+      - Le Mans
+      - Brest
+      - Tours
+      - Amiens
+      - Limoges
+      - Annecy
+      - Boulogne-Billancourt
+      - Perpignan
+      - Metz
+      - Besancon
+      - Orleans
+      - Rouen
+      - Montreuil
+      - Argenteuil
+      - Mulhouse
+      - Caen
+      - Nancy
+      - Roubaix
+      - Tourcoing
+      - Nanterre
+      - Vitry-sur-Seine
+      - Creteil
+      - Avignon
+      - Poitiers
+      - Aubervilliers
+      - Dunkerque
+      - Aulnay-sous-Bois
+      - Colombes
+      - Asnieres-sur-Seine
+      - Versailles
+      - Courbevoie
+      - Cherbourg-en-Cotentin
+      - Rueil-Malmaison
+      - Beziers
+      - Champigny-sur-Marne
+      - Pau
+      - La Rochelle
+      - Saint-Maur-des-Fosses
+      - Cannes
+      - Calais
+      - Antibes
+      - Drancy
+      - Ajaccio
+      - Merignac
+      - Saint-Nazaire
+      - Colmar
+      - Issy-les-Moulineaux
+      - Noisy-le-Grand
+      - Venissieux
+      - Evry-Courcouronnes
+      - Levallois-Perret
+      - Cergy
+      - Neuilly-sur-Seine
+      - Pessac
+      - Chambery
+      - Ivry-sur-Seine
+      - Enfants
+      - Quimper
+      - La Seyne-sur-Mer
+      - Antony
+      - Villeneuve-d'Ascq
+      - Lorient
+      - Saint-Quentin
+      - Epinay-sur-Seine
+      - Pantin
+      - Beauvais
+      - Tournefeuille
+      - Hyeres
+      - Cholet
+      - Garges-les-Gonesse
+      - Meaux
+      - Fontenay-sous-Bois
+      - Vincennes
+      - Arles
+      - Grasse
+      - Vannes
+      - Montlucon
+      - Belfort
+      - Charleville-Mezieres
+      - Saint-Brieuc
+      - Albi
+      - Martigues
+      - Cagnes-sur-Mer
+      - Tarbes
+      - Massy
+      - Laval
+      - Bourg-en-Bresse
+      - Aubagne
+      - Valenciennes
+      - Chateauroux
+      - Saint-Priest
+      - Saint-Malo
+      - Blois
+      - Salon-de-Provence
+      - Carcassonne
+      - Chalon-sur-Saone
+      - Thionville
+      - Brive-la-Gaillarde
+      - Meudon
+      - Castres
+      - Puteaux
+      - Suresnes
+      - Saint-Herblain
+      - Mantes-la-Jolie
+      - Gennevilliers
+      - Sète
+      - Istres
+      - Valence
+      - Caluire-et-Cuire
+      - Saint-Germain-en-Laye
+      - Talence
+      - Bastia
+      - Roanne
+      - Le Cannet
+      - Alfortville
+      - Corbeil-Essonnes
+      - Boulogne-sur-Mer
+      - Bagneux
+      - Macon
+      - Douai
+      - Auxerre
+      - Nevers
+      - Gap
+      - Reze
+      - Lens
+      - Montelimar
+      - Melun
+      - Draguignan
+      - Alencon
+      - Angouleme
+      - Agen
+      - Biarritz
+      - Chatellerault
+      - Vienne
+      - Schiltigheim
+      - Plaine
+      - Dieppe
+      - Moulins
+      - Mont-de-Marsan
+      - Haguenau
+      - Aurillac
+      - Dax
+      - Perigueux
+      - Vichy
+      - Cambrai
+      - Sens
+      - Rochefort
+      - Epinal
+      - Franconville
+      - Tremblay-en-France
+      - Chaville
+      - Goussainville
+      - Clichy
+      - Bezons
+      - Houilles
+      - Cormeilles-en-Parisis
+      - Ermont
+      - Sannois
+      - Saint-Leu-la-Foret
+      - Saint-Ouen
+      - Montigny-le-Bretonneux
+      - Conflans-Sainte-Honorine
+      - Pontoise
+      - Les Mureaux
+      - Plaisir
+      - Trappes
+      - Chatou
+      - Le Chesnay-Rocquencourt
+      - Guyancourt
+      - Elancourt
+      - Rambouillet
+      - Maisons-Laffitte
+      - Marly-le-Roi
+      - Velizy-Villacoublay
+      - Maurepas
+      - Montesson
+      - Saint-Cyr-l'Ecole
+      - Bois-d'Arcy
+      - Fontenay-le-Fleury
+      - Acheres
+      - Taverny
+      - Herblay
+      - Montmorency
+      - Saint-Gratien
+      - Deuil-la-Barre
+      - Soisy-sous-Montmorency
+      - Montmagny
+      - Saint-Brice-sous-Foret
+      - Arnouville
+      - Gonesse
+      - Villiers-le-Bel
+      - Sarcelles
+      - Fosses
+      - Louvres
+      - Survilliers
+      - Marly-la-Ville
+      - Persan
+      - Beaumont-sur-Oise
+      - Chambly
+      - Meru
+      - Creil
+      - Nogent-sur-Oise
+      - Montataire
+      - Senlis
+      - Chantilly
+      - Compiegne
+      - Margny-les-Compiegne
+      - Noyon
+      - Thourotte
+      - Ribecourt-Dreslincourt
+      - Saint-Just-en-Chaussée
+      - Clermont
+      - Breteuil
+      - Saint-Omer
+      - Longuenesse
+      - Arques
+      - Aire-sur-la-Lys
+      - Hazebrouck
+      - Bailleul
+      - Merville
+      - Nieppe
+      - Armentieres
+      - Houplines
+      - Comines
+      - Wervicq-Sud
+      - Bousbecque
+      - Roncq
+      - Halluin
+      - Neuville-en-Ferrain
+      - Linselles
+      - Bondues
+      - Mouvaux
+      - Wasquehal
+      - Croix
+      - Hem
+      - Lys-lez-Lannoy
+      - Leers
+      - Toufflers
+      - Sailly-lez-Lannoy
+      - Baisieux
+      - Willems
+      - Chereng
+      - Anstaing
+      - Gruson
+      - Bouvines
+      - Cysoing
+      - Louvil
+      - Peronne
+      - Templeuve-en-Pevele
+      - Capelle-en-Pevele
+      - Genech
+      - Cappelle-en-Pevele
+      - Pont-a-Marcq
+      - Ennevelin
+      - Fretin
+      - Avelin
+      - Vendeville
+      - Templemars
+      - Wattignies
+      - Faches-Thumesnil
+      - Ronchin
+      - Lesquin
+      - Lezennes
+      - Hellemmes
+      - Mons-en-Baroeul
+      - La Madeleine
+      - Marcq-en-Baroeul
+      - Lambersart
+      - Lompret
+      - Verlinghem
+      - Wambrechies
+      - Marquette-lez-Lille
+      - Saint-Andre-lez-Lille
+      - Loos
+      - Haubourdin
+      - Sequedin
+      - Englos
+      - Ennetieres-en-Weppes
+      - Escobecques
+      - Erquinghem-le-Sec
+      - Beaucamps-Ligny
+      - Fournes-en-Weppes
+      - Wicres
+      - Marquillies
+      - Hantay
+      - Salome
+      - La Bassee
+      - Illies
+      - Herlies
+      - Aubers
+      - Fromelles
+      - Le Maisnil
+      - Radinghem-en-Weppes
+      - Bois-Grenier
+      - Fleurbaix
+      - Laventie
+      - Sailly-sur-la-Lys
+      - Estaires
+      - La Gorgue
+      - Neuf-Berquin
+      - Vieux-Berquin
+      - Strazeele
+      - Merris
+      - Meteren
+      - Berthen
+      - Boeschepe
+      - Saint-Jans-Cappel
+      - Godewaersvelde
+      - Saint-Paul
+      - Fort-de-France
+      - Cherbourg
+      - Bayonne
+      - Narbonne
+      - Rodez
+      - Auch
+      - Cahors
+      - Mende
+      - Privas
+      - Digne-les-Bains
+      - Thonon-les-Bains
+      - Evian
+      - Lons-le-Saunier
+      - Vesoul
+      - Bar-le-Duc
+      - Laon
+      - Arras
+      - Maubeuge
+      - Bethune
+      - Evreux
+      - Alençon
+      - Chartres
+      - Dreux
+      - Bourges
+      - Troyes
+      - Montereau-Fault-Yonne
+      - Chaumont
+      - Saint-Dizier
+      - Verdun
+      - Sarreguemines
+      - Forbach
+      - Hagondange
+      - Sarrebourg
+      - Saverne
+      - Sélestat
+      - Montbéliard
+      - Pontarlier
+      - Lure
+      - Luxeuil-les-Bains
+      - Chalon-sur-Saône
+      - Autun
+      - Beaune
+      - Paray-le-Monial
+      - Thiers
+      - Issoire
+      - Riom
+      - Saint-Flour
+      - Tulle
+      - Ussel
+      - Gueret
+      - La Creuse
+      - Périgueux
+      - Sarlat
+      - Bergerac
+      - Villeneuve-sur-Lot
+      - Marmande
+      - Landes
+      - Arcachon
+      - Langon
+      - Libourne
+      - Saintes
+      - Royan
+      - Cognac
+      - Niort
+      - Fontenay-le-Comte
+      - Bressuire
+      - Saumur
+      - departement 01
+      EXPANSION_LOCATIONS:
+      - Paris 1er
+      - Paris 2e
+      - Paris 3e
+      - Paris 4e
+      - Paris 5e
+      - Paris 6e
+      - Paris 7e
+      - Paris 8e
+      - Paris 9e
+      - Paris 10e
+      - Paris 11e
+      - Paris 12e
+      - Paris 13e
+      - Paris 14e
+      - Paris 15e
+      - Paris 16e
+      - Paris 17e
+      - Paris 18e
+      - Paris 19e
+      - Paris 20e
+      - Boulogne-Billancourt
+      - Montreuil
+      - Argenteuil
+      - Nanterre
+      - Courbevoie
+      - Colombes
+      - Asnières-sur-Seine
+      - Rueil-Malmaison
+      - Aubervilliers
+      - Champigny-sur-Marne
+      - Drancy
+      - Saint-Maur-des-Fossés
+      - Issy-les-Moulineaux
+      - Levallois-Perret
+      - Noisy-le-Grand
+      - Antony
+      - Neuilly-sur-Seine
+      - Clichy
+      - Pantin
+      - Bondy
+      - Villejuif
+      - Sarcelles
+      - Cergy
+      - Palaiseau
+      - Massy
+      - Suresnes
+      - Meaux
+      - Melun
+      - Corbeil-Essonnes
+      - Sèvres
+      - Montrouge
+      - Malakoff
+      - Clamart
+      - Fontenay-aux-Roses
+      - Châtenay-Malabry
+      - Sceaux
+      - Bourg-la-Reine
+      - Cachan
+      - Arcueil
+      - Gentilly
+      - Ivry-sur-Seine
+      - Vitry-sur-Seine
+      - Thiais
+      - Choisy-le-Roi
+      - Orly
+      - Saint-Ouen
+      - Gennevilliers
+      - Le Blanc-Mesnil
+      - Épinay-sur-Seine
+      - Sartrouville
+      - Poissy
+      - Trappes
+      - Les Mureaux
+      - Mantes-la-Jolie
+      - Rambouillet
+      - Étampes
+      - Dreux
+      - Chartres
+      - Versailles
+      - Saint-Germain-en-Laye
+      - Torcy
+      - Lagny-sur-Marne
+      - Chelles
+      - Bussy-Saint-Georges
+      - Roissy-en-Brie
+      - Fontainebleau
+      - Villeurbanne
+      - Vénissieux
+      - Saint-Priest
+      - Bron
+      - Vaulx-en-Velin
+      - Décines-Charpieu
+      - Meyzieu
+      - Oullins
+      - Caluire-et-Cuire
+      - Rillieux-la-Pape
+      - Givors
+      - Bourgoin-Jallieu
+      - Vienne
+      - Échirolles
+      - Saint-Martin-d'Hères
+      - Fontaine
+      - Voiron
+      - Annemasse
+      - Thonon-les-Bains
+      - Aix-les-Bains
+      - Albertville
+      - Chambéry
+      - Annecy
+      - Saint-Étienne
+      - Firminy
+      - Roanne
+      - Montbrison
+      - Clermont-Ferrand
+      - Riom
+      - Issoire
+      - Thiers
+      - Le Puy-en-Velay
+      - Aurillac
+      - Mende
+      - Alès
+      - Béziers
+      - Sète
+      - Lunel
+      - Frontignan
+      - Agde
+      - Castelnau-le-Lez
+      - Lattes
+      - Perpignan
+      - Narbonne
+      - Carcassonne
+      - Avignon
+      - Orange
+      - Carpentras
+      - Cavaillon
+      - Salon-de-Provence
+      - Istres
+      - Martigues
+      - Marignane
+      - Aubagne
+      - La Ciotat
+      - Bandol
+      - Sanary-sur-Mer
+      - La Seyne-sur-Mer
+      - Hyères
+      - Fréjus
+      - Saint-Raphaël
+      - Grasse
+      - Cannes
+      - Antibes
+      - Cagnes-sur-Mer
+      - Saint-Laurent-du-Var
+      - Menton
+      - Draguignan
+      - Brignoles
+      - Gap
+      - Manosque
+      - Digne-les-Bains
+      - Valence
+      - Romans-sur-Isère
+      - Montélimar
+      - Grenoble
+      - Bourg-en-Bresse
+      - Oyonnax
+      - Mâcon
+      - Chalon-sur-Saône
+      - Beaune
+      - Dijon
+      - Auxerre
+      - Sens
+      - Nevers
+      - Moulins
+      - Montluçon
+      - Vichy
+      - Limoges
+      - Guéret
+      - Tulle
+      - Brive-la-Gaillarde
+      - Périgueux
+      - Bergerac
+      - Agen
+      - Montauban
+      - Albi
+      - Castres
+      - Rodez
+      - Cahors
+      - Tarbes
+      - Pau
+      - Bayonne
+      - Biarritz
+      - Anglet
+      - Dax
+      - Mont-de-Marsan
+      - Libourne
+      - Arcachon
+      - La Rochelle
+      - Rochefort
+      - Saintes
+      - Niort
+      - Bressuire
+      - Saumur
+      - Angers
+      - Cholet
+      - Laval
+      - Le Mans
+      - Tours
+      - Saint-Cyr-sur-Loire
+      - Joué-lès-Tours
+      - Blois
+      - Vendôme
+      - Orléans
+      - Montargis
+      - Chartres
+      - Caen
+      - Cherbourg-en-Cotentin
+      - Saint-Lô
+      - Granville
+      - Le Havre
+      - Dieppe
+      - Rouen
+      - Évreux
+      - Alençon
+      - Lisieux
+      - Deauville
+      - Lille
+      - Roubaix
+      - Tourcoing
+      - Dunkerque
+      - Calais
+      - Boulogne-sur-Mer
+      - Arras
+      - Lens
+      - Béthune
+      - Valenciennes
+      - Douai
+      - Cambrai
+      - Maubeuge
+      - Amiens
+      - Beauvais
+      - Compiègne
+      - Creil
+      - Reims
+      - Châlons-en-Champagne
+      - Épernay
+      - Troyes
+      - Chaumont
+      - Nancy
+      - Metz
+      - Thionville
+      - Forbach
+      - Sarreguemines
+      - Strasbourg
+      - Colmar
+      - Mulhouse
+      - Haguenau
+      - Besançon
+      - Belfort
+      - Montbéliard
+      - Dole
+      - Lons-le-Saunier
+      - Pontarlier
+      - Nîmes
+      - Albi
+      - Montpellier
+      - Narbonne
+      - Perpignan
+      - Toulouse
+      - Blagnac
+      - Colomiers
+      - Tournefeuille
+      - Muret
+      - Tarbes
+      - Pau
+      - Bayonne
+      - Biarritz
+      - Bordeaux
+      - Mérignac
+      - Pessac
+      - Talence
+      - Bègles
+      - Arcachon
+      - Libourne
+      - La Rochelle
+      - Nantes
+      - Saint-Nazaire
+      - Rezé
+      - Orvault
+      - Saint-Herblain
+      - Vertou
+      - Carquefou
+      - Rennes
+      - Saint-Malo
+      - Vitré
+      - Fougères
+      - Redon
+      - Lorient
+      - Vannes
+      - Quimper
+      - Brest
+      - Morlaix
+      - Lannion
+      - Saint-Brieuc
+      - Dinan
+      - departement 75
+      - departement 92
+      - departement 93
+      - departement 94
+      - departement 78
+      - departement 91
+      - departement 77
+      - departement 95
+      - departement 69
+      - departement 13
+      - departement 06
+      - departement 33
+      - departement 31
+      - departement 59
+      - departement 44
+      - departement 67
+      - departement 34
+      - departement 38
+      - departement 35
+      - departement 76
+      - departement 51
+      - departement 54
+      - departement 57
+      - departement 68
+      - departement 74
+      - departement 73
+      - departement 62
+      - departement 80
+      - departement 14
+      - departement 27
+      - departement 29
+      - departement 56
+      - departement 22
+      - departement 49
+      - departement 72
+      - departement 37
+      - departement 86
+      - departement 87
+      - departement 24
+      - departement 47
+      - departement 64
+      - departement 40
+      - departement 17
+      - departement 79
+      - departement 85
+      - departement 53
+      - departement 50
+      - departement 61
+      - departement 60
+      - departement 02
+      - departement 08
+      - departement 10
+      - departement 52
+      - departement 88
+      - departement 90
+      - departement 25
+      - departement 39
+      - departement 70
+      - departement 71
+      - departement 21
+      - departement 58
+      - departement 03
+      - departement 63
+      - departement 42
+      - departement 43
+      - departement 07
+      - departement 26
+      - departement 84
+      - departement 30
+      - departement 48
+      - departement 12
+      - departement 81
+      - departement 82
+      - departement 46
+      - departement 15
+      - departement 19
+      - departement 23
+      - departement 16
+      - departement 18
+      - departement 36
+      - departement 41
+      - departement 45
+      - departement 28
+      - departement 89
+      - departement 55
+      - departement 65
+      - departement 66
+      - departement 11
+      - departement 83
+      - departement 05
+      - departement 04
+      - departement 01
+      EXCLUDE_DOMAINS:
+      - duckduckgo.com
+      - google.com
+      - google.fr
+      - facebook.com
+      - instagram.com
+      - linkedin.com
+      - youtube.com
+      - pinterest.com
+      - tiktok.com
+      - societe.com
+      - pagesjaunes.fr
+      PAPPERS_ENABLED: false
+      NICHE_METADATA:
+        angle: Remplir le carnet rénovation intérieure et tous corps d'état
+        valeur_client: Rénovation maison 20–80 k€
+        effectif_cible: entreprises générales du bâtiment avec salariés
+        priorite: 19
   restaurants_independants:
     label: Restaurants indépendants (France)
     niche_group: restaurants_independants
